@@ -236,33 +236,53 @@ class EdgarClient:
 
         return results
 
+    async def get_filing_documents(
+        self,
+        cik: str,
+        accession_number: str,
+    ) -> dict[str, Optional[str]]:
+        """
+        Fetch the filing directory index once and return both URLs.
+
+        Returns a dict with:
+          exhibit_url  — EX-99.1 press release URL if found, else None
+          primary_url  — primary (iXBRL) document URL if found, else None
+
+        Using a single index.json fetch avoids two separate HTTP calls.
+        """
+        cik_int = int(cik)
+        acc_clean = accession_number.replace("-", "")
+        base = f"{_ARCHIVES_BASE}/{cik_int}/{acc_clean}"
+
+        try:
+            resp = await self._get(f"{base}/index.json")
+        except httpx.HTTPStatusError:
+            return {"exhibit_url": None, "primary_url": None}
+
+        items: list[dict] = resp.json().get("directory", {}).get("item", [])
+        exhibit_url: Optional[str] = None
+        primary_url: Optional[str] = None
+
+        for item in items:
+            name: str = item.get("name", "")
+            if not name.endswith(".htm"):
+                continue
+            if _RE_EX99.search(name):
+                exhibit_url = f"{base}/{name}"
+            elif primary_url is None:
+                # First non-exhibit .htm file is the primary document
+                primary_url = f"{base}/{name}"
+
+        return {"exhibit_url": exhibit_url, "primary_url": primary_url}
+
     async def get_exhibit_url(
         self,
         cik: str,
         accession_number: str,
     ) -> Optional[str]:
-        """
-        Scan the filing directory listing for an Exhibit 99.1 press release.
-        EDGAR's index.json uses a directory/item structure with filenames only —
-        exhibit type is inferred from the filename pattern (e.g. 'ex991', 'ex-99').
-        Returns the full URL of the first matching .htm file, or None.
-        """
-        cik_int = int(cik)
-        acc_clean = accession_number.replace("-", "")
-        index_url = f"{_ARCHIVES_BASE}/{cik_int}/{acc_clean}/index.json"
-
-        try:
-            resp = await self._get(index_url)
-        except httpx.HTTPStatusError:
-            return None
-
-        items: list[dict] = resp.json().get("directory", {}).get("item", [])
-        for item in items:
-            name: str = item.get("name", "")
-            if name.endswith(".htm") and _RE_EX99.search(name):
-                return f"{_ARCHIVES_BASE}/{cik_int}/{acc_clean}/{name}"
-
-        return None
+        """Return EX-99.1 URL if present. Thin wrapper over get_filing_documents."""
+        docs = await self.get_filing_documents(cik, accession_number)
+        return docs["exhibit_url"]
 
     # ------------------------------------------------------------------
     # Content
