@@ -77,14 +77,15 @@ class VectorStore:
         if form_type:
             must.append(FieldCondition(key="form_type", match=MatchValue(value=form_type)))
 
-        hits = self._client.search(
+        # qdrant-client ≥1.9 uses query_points(); .search() was removed in 1.12+
+        result = self._client.query_points(
             collection_name=COLLECTION,
-            query_vector=vector,
+            query=vector,
             limit=limit,
             query_filter=Filter(must=must) if must else None,
             with_payload=True,
         )
-        return [{**hit.payload, "score": hit.score} for hit in hits]
+        return [{**(hit.payload or {}), "score": hit.score} for hit in result.points]
 
     def count(self) -> int:
         return self._client.count(collection_name=COLLECTION).count
