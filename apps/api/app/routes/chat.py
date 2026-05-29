@@ -28,9 +28,12 @@ class ChatResponse(BaseModel):
 
 
 async def _resolve_ticker(message: str, hint: str | None) -> str | None:
-    """Return uppercase ticker: hint → Haiku extraction → None."""
-    if hint:
-        return hint.upper()
+    """Return uppercase ticker: message extraction → hint fallback → None.
+
+    Message extraction takes priority so that typing "nvidia" overrides a
+    stale dropdown selection. The hint is the fallback for generic queries
+    like "what happened recently?" where no company is named.
+    """
     if settings.anthropic_api_key:
         try:
             import anthropic
@@ -42,6 +45,8 @@ async def _resolve_ticker(message: str, hint: str | None) -> str | None:
                 return tickers[0]
         except Exception as exc:
             log.warning("Ticker extraction failed: %s", exc)
+    if hint:
+        return hint.upper()
     return None
 
 

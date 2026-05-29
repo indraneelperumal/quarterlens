@@ -17,7 +17,7 @@ export function ChatShell() {
     },
   ]);
   const [input, setInput] = useState("");
-  const [ticker, setTicker] = useState("AAPL");
+  const [ticker, setTicker] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function onSubmit(e: FormEvent) {
@@ -72,6 +72,7 @@ export function ChatShell() {
             onChange={(e) => setTicker(e.target.value)}
             className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
           >
+            <option value="">Auto-detect</option>
             {WATCHLIST.map((t) => (
               <option key={t} value={t}>
                 {t}
