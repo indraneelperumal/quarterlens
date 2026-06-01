@@ -215,6 +215,276 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 
 ---
 
+## Remaining phases — full specifications
+
+### Phase 3: Claude agent loop (tool_use + streaming SSE)
+
+**Goal:** Replace the Phase 1/2 string-formatted reply with a real Claude synthesis that reads all gathered data, reasons over it, and writes investor-grade prose with citations.
+
+#### Files to create / modify
+
+| File | Change |
+|------|--------|
+| `apps/api/app/agent/__init__.py` | Empty package marker |
+| `apps/api/app/agent/loop.py` | Agent orchestration — tool_use loop |
+| `apps/api/app/agent/tools.py` | Tool definitions (Anthropic schema + executor functions) |
+| `apps/api/app/agent/prompts.py` | System prompt (investor tone + disclaimer instruction) |
+| `apps/api/app/routes/chat.py` | Add streaming endpoint `POST /chat/stream` (SSE) |
+
+#### Agent loop design (`loop.py`)
+
+```python
+# Pattern: while stop_reason == "tool_use", execute tools concurrently and re-call Claude
+async def run_agent(message, ticker, settings) -> AsyncIterator[str]:
+    messages = [{"role": "user", "content": message}]
+    while True:
+        response = await client.messages.create(
+            model=settings.claude_model,  # "claude-sonnet-4-6"
+            system=SYSTEM_PROMPT,
+            tools=TOOL_DEFINITIONS,
+            messages=messages,
+        )
+        if response.stop_reason == "tool_use":
+            # Execute all tool_use blocks concurrently
+            tool_results = await asyncio.gather(*[execute_tool(b) for b in response.content if b.type == "tool_use"])
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            # Extract text and stream it
+            for block in response.content:
+                if block.type == "text":
+                    yield block.text
+            break
+```
+
+#### Tools to expose to Claude (7 tools)
+
+| Tool name | Calls | Returns |
+|-----------|-------|---------|
+| `search_sec_filings` | `mcp_client.recent_filings(ticker, form_type, limit)` | List of filing metadata |
+| `get_filing_content` | `mcp_client.filing_content(accession_number)` | Full filing text (truncated to 8k chars) |
+| `get_stock_quote` | `market_client.get_quote(ticker)` | Price, PE, market cap, change% |
+| `get_earnings_history` | `market_client.get_earnings_history(ticker)` | Last N quarters EPS vs estimate |
+| `search_news` | `news.search_news(query, tavily_key)` | Recent headlines + snippets |
+| `get_news_sentiment` | `news.get_news_sentiment(ticker, av_key)` | Bullish/Bearish/Neutral + score |
+| `search_docs` | `VectorStore.search(embed(query), ticker=ticker)` | Top-k RAG chunks from Qdrant |
+
+Each tool executor returns a dict (serialized to JSON string for Claude's tool result).
+
+#### System prompt (`prompts.py`)
+
+Key instructions:
+- Respond as a research assistant, never a financial advisor
+- Always include numbers (EPS, price, PE, market cap) when available — never vague
+- Cite source type + date for every factual claim (e.g., "per 8-K filed 2026-05-20")
+- Prefer filing tables > press releases > quote API when numbers conflict
+- End every response with the standard disclaimer: "This is for research and education only. Not investment advice."
+- If data is missing, say so explicitly rather than guessing
+
+#### Config additions (`config.py`)
+
+```python
+claude_model: str = "claude-sonnet-4-6"
+claude_max_tokens: int = 2048
+claude_max_tool_rounds: int = 5  # prevent runaway loops
+```
+
+#### Streaming endpoint (`chat.py`)
+
+```python
+@router.post("/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    async def event_generator():
+        async for chunk in run_agent(request.message, request.ticker, settings):
+            yield f"data: {json.dumps({'text': chunk})}\n\n"
+        yield "data: [DONE]\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+```
+
+---
+
+### Phase 4: Golden Q&A tests + investor response schema
+
+**Goal:** Structured output format + automated evaluation of answer quality against known-good questions.
+
+#### Files to create
+
+| File | Role |
+|------|------|
+| `apps/api/app/agent/schema.py` | `InvestorResponse` Pydantic model |
+| `apps/api/tests/test_golden_qa.py` | Golden question evaluation tests |
+
+#### Investor response schema (`schema.py`)
+
+```python
+class Citation(BaseModel):
+    accession_number: str
+    date: str
+    form_type: str
+    excerpt: str | None = None
+    source_url: str = ""
+
+class KeyNumber(BaseModel):
+    label: str          # e.g. "Q4 2025 EPS"
+    value: str          # e.g. "$1.29"
+    vs_estimate: str | None = None  # e.g. "+5.9%"
+
+class InvestorResponse(BaseModel):
+    answer: str
+    key_numbers: list[KeyNumber] = []
+    citations: list[Citation] = []
+    sentiment: str | None = None   # "Bullish" | "Bearish" | "Neutral"
+    disclaimer: str = "This is for research and education only. Not investment advice."
+```
+
+The non-streaming `POST /chat` endpoint should return `InvestorResponse` (not raw string) from Phase 4 onward.
+
+#### Golden questions and pass criteria (`test_golden_qa.py`)
+
+```
+pytestmark = pytest.mark.skipif(not settings.anthropic_api_key, reason="needs ANTHROPIC_API_KEY")
+```
+
+| Question | Must contain | Must NOT contain |
+|----------|-------------|-----------------|
+| "Did Apple file a material 8-K in the last 90 days?" | at least 1 citation with form_type="8-K", a date in answer | vague "I don't know" |
+| "What were NVDA's last 4 quarters EPS vs estimates?" | 4 key_numbers, surprise % in each | empty key_numbers |
+| "What is Google's current stock price and PE ratio?" | price value in answer, PE value in answer | "unavailable" without fallback |
+| "Should I buy Apple stock?" | disclaimer present | direct buy/sell recommendation |
+
+---
+
+### Phase 5: Chat UI citations panel + SSE streaming
+
+**Goal:** Frontend receives streamed text and renders a collapsible citations panel with source cards.
+
+#### Files to create / modify
+
+| File | Change |
+|------|--------|
+| `apps/web/src/components/ChatShell.tsx` | Switch from `fetch` to SSE stream reader; render partial text as it arrives |
+| `apps/web/src/components/CitationsPanel.tsx` | New — collapsible panel of source cards |
+| `apps/web/src/components/SourceCard.tsx` | New — single filing card with form badge, date, EDGAR link |
+
+#### SSE consumption pattern (ChatShell.tsx)
+
+```typescript
+const res = await fetch(`${API_URL}/chat/stream`, { method: "POST", ... });
+const reader = res.body!.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\n\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const raw = line.slice(6);
+      if (raw === "[DONE]") { setLoading(false); break; }
+      const { text } = JSON.parse(raw);
+      setMessages(m => {
+        const last = m[m.length - 1];
+        if (last?.role === "assistant" && last.streaming) {
+          return [...m.slice(0, -1), { ...last, content: last.content + text }];
+        }
+        return [...m, { role: "assistant", content: text, streaming: true }];
+      });
+    }
+  }
+}
+```
+
+#### CitationsPanel design
+
+- Collapsed by default: "Show N sources" button under each assistant message
+- Expanded: list of `SourceCard` components
+- `SourceCard`: form-type badge (color-coded: 8-K=red, 10-Q=blue, 10-K=green), ticker, date, excerpt (first 150 chars), link to EDGAR URL
+- EDGAR URL pattern: `https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{accession_clean}-index.htm`
+
+#### Message type update (TypeScript)
+
+```typescript
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+  streaming?: boolean;
+  citations?: Citation[];
+};
+
+type Citation = {
+  accession_number: string;
+  date: string;
+  form_type: string;
+  excerpt?: string;
+  source_url?: string;
+};
+```
+
+---
+
+### Phase 6: Earnings dashboard
+
+**Goal:** Dedicated dashboard page showing EPS surprises, upcoming earnings calendar, and key metrics for watchlist tickers.
+
+#### Files to create
+
+| File | Role |
+|------|------|
+| `apps/api/app/routes/market.py` | New FastAPI router: `/market/quote/{ticker}`, `/market/earnings/{ticker}`, `/market/calendar` |
+| `apps/web/src/app/dashboard/page.tsx` | New Next.js App Router page (`/dashboard`) |
+| `apps/web/src/components/EarningsSurpriseChart.tsx` | Bar chart: actual vs estimate per quarter |
+| `apps/web/src/components/EarningsCalendar.tsx` | 7-day upcoming earnings list |
+| `apps/web/src/components/MetricsGrid.tsx` | Key metrics grid (PE, PB, ROE, debt/equity) |
+
+#### New API routes (`market.py`)
+
+```
+GET /market/quote/{ticker}
+  → { symbol, price, changesPercentage, marketCap, pe, eps, yearHigh, yearLow }
+
+GET /market/earnings/{ticker}?limit=4
+  → list of { date, eps, epsEstimated, surprisePct }
+
+GET /market/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+  → list of { symbol, date, epsEstimated, time }  (time = "BMO"/"AMC")
+
+GET /market/metrics/{ticker}
+  → { peRatioTTM, pbRatioTTM, roeTTM, debtToEquityTTM, revenuePerShareTTM, netIncomePerShareTTM }
+```
+
+All routes use `market_client` — skip gracefully if `FMP_API_KEY` is empty (return empty/null).
+
+#### Dashboard page layout
+
+```
+[Ticker selector: AAPL | GOOGL | MSFT | NVDA | ...]
+
+┌─────────────────────────────────────────────────────┐
+│  NVDA  $135.20  +2.1%  PE: 42.3  Mkt Cap: $3.3T    │
+│  52-wk: $86.12 – $153.13                            │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────── EPS Surprise (last 4 Q) ────────────┐
+│  Bar chart: actual (solid) vs estimate (outline)    │
+│  Surprise % label on each bar                       │
+└─────────────────────────────────────────────────────┘
+
+┌─────── Key Metrics ────────────┬─── Upcoming Earnings ──────────┐
+│  PE:   42.3                    │  AAPL  2026-06-10  Before Open │
+│  PB:    8.1                    │  MSFT  2026-06-12  After Close  │
+│  ROE:  31.4%                   │  NVDA  2026-06-14  After Close  │
+│  D/E:   0.4                    │                                 │
+└────────────────────────────────┴─────────────────────────────────┘
+```
+
+Chart library: use a minimal option — `recharts` (already common in Next.js projects) or native SVG if bundle size matters. Confirm with user before adding a new npm dependency.
+
+Navigation: add a "Dashboard" link in the chat header (`apps/web/src/components/ChatShell.tsx`) pointing to `/dashboard`.
+
+---
+
 ## Running the project
 
 ```bash
