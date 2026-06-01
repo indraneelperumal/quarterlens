@@ -1,6 +1,6 @@
 # Continuation — MCP Earnings Intelligence Agent
 
-**Last updated:** Phase 0 complete (local dev verified)  
+**Last updated:** Phase 2 step 1 complete (FMP async HTTP client done, committed)  
 **Frozen spec:** Our plan — Next.js + FastAPI, Qdrant, FMP + AV, hybrid MCP+RAG, Claude, MVP C
 
 ---
@@ -120,8 +120,8 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | **0** | Monorepo, Qdrant compose, FastAPI skeleton, Next.js chat shell | Done |
-| **1** | SEC EDGAR MCP + ingest AAPL/GOOGL → Qdrant | Next |
-| **2** | Market-data MCP (FMP) + Tavily MCP + Alpha Vantage MCP (news + sentiment) | Pending |
+| **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
+| **2** | Market-data MCP (FMP) + Tavily + Alpha Vantage + parallel gather | In progress — Step 1 done |
 | **3** | Claude agent loop (MCP + RAG + streaming) | Pending |
 | **4** | Golden Q&A tests + investor response schema | Pending |
 | **5** | Chat UI citations panel + SSE | Pending |
@@ -144,7 +144,7 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ---
 
-## Issues encountered (Phase 0)
+## Issues encountered (all phases)
 
 | # | Issue | Symptom | Cause | Fix / status |
 |---|-------|---------|-------|--------------|
@@ -158,6 +158,16 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | 8 | **Python version** | `requires-python >=3.12` failed on machine | System had Python 3.10, not 3.12 | Relaxed to `>=3.10`; `.python-version` set to `3.10` |
 | 9 | **Next.js dev startup** | `uv_interface_addresses` system error in sandbox | Next trying to enumerate network interfaces | `npm run dev -- --hostname 127.0.0.1` in `package.json` |
 | 10 | **Chat error UX** | Generic "Could not reach API" on all failures | No distinction between network vs HTTP errors | ChatShell shows API `detail` when available |
+| 11 | **`parents[5]` in ingest.py** | `ModuleNotFoundError` for edgar package | Off-by-one in path resolution | `parents[4]` is monorepo root |
+| 12 | **Random UUID4 chunk IDs** | Duplicate Qdrant points on re-ingest | `uuid4()` not deterministic | `uuid5(NAMESPACE_URL, f"{accession}#{chunk_index}")` |
+| 13 | **`json.loads` on ERROR string** | `JSONDecodeError` in MCP client | SEC server returns `"ERROR: ..."` string | Check `text.startswith("ERROR:")` before parsing JSON |
+| 14 | **Qdrant `.search()` removed** | `AttributeError` at query time | Removed in qdrant-client 1.12+ | Use `query_points()`, access `result.points` |
+| 15 | **Ticker dropdown overrides message** | AAPL selected even when asking about NVDA | Hint applied before extraction | Message extraction first, hint as fallback |
+| 16 | **`embed_texts` blocks event loop** | Slow responses, event loop warnings | CPU-bound call in async route | `loop.run_in_executor(None, partial(embed_texts, [...]))` |
+| 17 | **Session-scoped fixture + skip** | Single `pytest.skip()` kills entire suite | pytest session fixture aborts on skip | Switch to function-scoped fixture |
+| 18 | **FMP retry sleeps after last attempt** | Wastes 4s on final failure | `asyncio.sleep` inside last loop iteration | `if attempt < 3: await asyncio.sleep(...)` |
+| 19 | **FMP 200 `{"Error Message": "..."}` silent** | Bad API key returns no error | FMP uses HTTP 200 for quota/key errors | Detect and raise `ValueError` in `_get` |
+| 20 | **Semaphore in `__init__`** | Event loop binding error pre-3.10 | Semaphore created before loop starts | Lazy init via `_get_sem()` method |
 
 ### Valid endpoints (reference)
 
@@ -174,22 +184,21 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ## Done
 
-- [x] Monorepo layout (`apps/web`, `apps/api`, `packages/mcp-servers`)
-- [x] Docker Compose — Qdrant on `:6333`
-- [x] `.env.example` with required keys
-- [x] FastAPI — `/`, `/health`, `/chat` (placeholder)
-- [x] Root `.env` loading from monorepo
-- [x] Next.js chat shell + disclaimer footer
-- [x] `apps/web/.env.local` template flow
-- [x] API tests (`test_health`, `test_chat`, `test_root`)
-- [x] Uvicorn reload scoped to `app/` only
-- [x] Local dev verified (API :8000 + Web :3000)
+- [x] Phase 0: Monorepo, Docker Compose, FastAPI skeleton, Next.js chat shell, API tests
+- [x] Phase 1 Step 1: SEC EDGAR async HTTP client (`edgar_client.py`)
+- [x] Phase 1 Step 2: Ticker resolver via Claude Haiku (`utils/ticker_resolver.py`)
+- [x] Phase 1 Step 3: SEC EDGAR FastMCP server (`packages/mcp-servers/sec-edgar/server.py`)
+- [x] Phase 1 Step 4: RAG pipeline — chunker, embedder, Qdrant store, ingest script
+- [x] Phase 1 Step 5: Chat route wired to MCP + Qdrant (8-K listings + vector search)
+- [x] Phase 1 Step 6: UI polish — Auto-detect ticker, error handling, smoke tests
+- [x] Phase 2 Step 1: FMP async HTTP client (`packages/mcp-servers/market-data/fmp_client.py`)
 
-## Next slice (Phase 1)
+## Next slice (Phase 2 — in progress)
 
-1. **SEC MCP** — connect community `mcp-server-edgar` (or thin wrapper); verify one tool call from FastAPI
-2. **Ingest** — fetch 8-K / 10-Q for `AAPL`, chunk with metadata, embed into Qdrant collection `financial_docs`
-3. **Smoke test** — golden question: “Did Apple file any material 8-K in the last 90 days?”
+2. **`server.py`** — market-data FastMCP server with 4 tools: `get_quote`, `get_earnings_history`, `get_earnings_calendar`, `get_key_metrics_ttm`
+3. **`market_client.py`** + `config.py` update — FastAPI-side stdio MCP client + `tavily_api_key` config
+4. **`news.py`** — Tavily + Alpha Vantage direct async REST wrappers
+5. **`chat.py` update** + `test_market_client.py` — parallel gather of all sources, integration tests
 
 ## Commands
 
