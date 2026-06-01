@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     fmp_api_key: str = ""
     alpha_vantage_api_key: str = ""
+    tavily_api_key: str = ""
     sec_edgar_user_agent: str = "EarningsAgent contact@example.com"
 
     qdrant_url: str = "http://localhost:6333"
