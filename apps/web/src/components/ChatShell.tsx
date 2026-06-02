@@ -1,10 +1,24 @@
 "use client";
 
 import { FormEvent, Fragment, useState } from "react";
+import { CitationsPanel } from "./CitationsPanel";
 
 const WATCHLIST = ["AAPL", "GOOGL", "MSFT", "NVDA", "AMZN", "JPM", "UNH", "XOM", "COST"];
 
-type Message = { role: "user" | "assistant"; content: string };
+type Citation = {
+  accession_number: string;
+  date: string;
+  form_type: string;
+  excerpt?: string;
+  source_url?: string;
+};
+
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+  citations?: Citation[];
+  streaming?: boolean;
+};
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -44,39 +58,83 @@ export function ChatShell() {
     const text = input.trim();
     if (!text || loading) return;
 
-    // Capture history before adding the new user message
     const history = messages.map((m) => ({ role: m.role, content: m.content }));
 
     setInput("");
     setMessages((m) => [...m, { role: "user", content: text }]);
     setLoading(true);
 
+    // Append an empty streaming assistant bubble immediately
+    setMessages((m) => [...m, { role: "assistant", content: "", streaming: true }]);
+
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      const res = await fetch(`${API_URL}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, ticker: ticker || null, history }),
       });
-      if (!res.ok) {
+
+      if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({}));
         const detail = typeof err.detail === "string" ? err.detail : `HTTP ${res.status}`;
         throw new Error(detail);
       }
-      const data = (await res.json()) as { reply: string };
-      setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6);
+          if (raw === "[DONE]") {
+            setLoading(false);
+            break;
+          }
+          let event: Record<string, unknown>;
+          try {
+            event = JSON.parse(raw);
+          } catch {
+            continue;
+          }
+
+          if ("text" in event) {
+            setMessages((m) => {
+              const last = { ...m[m.length - 1] };
+              last.content = (last.content ?? "") + (event.text as string);
+              return [...m.slice(0, -1), last];
+            });
+          } else if ("citations" in event) {
+            setMessages((m) => {
+              const last = { ...m[m.length - 1], citations: event.citations as Citation[], streaming: false };
+              return [...m.slice(0, -1), last];
+            });
+          }
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content:
-            msg === "Failed to fetch"
-              ? `Could not reach API at ${API_URL}. Start FastAPI: cd apps/api && uvicorn app.main:app --reload --reload-dir app`
-              : `API error: ${msg}`,
-        },
-      ]);
-    } finally {
+      setMessages((m) => {
+        // Replace the empty streaming bubble with the error
+        const withoutStreaming = m.filter((x) => !(x.role === "assistant" && x.streaming));
+        return [
+          ...withoutStreaming,
+          {
+            role: "assistant",
+            content:
+              msg === "Failed to fetch"
+                ? `Could not reach API at ${API_URL}. Start FastAPI: cd apps/api && uvicorn app.main:app --reload --reload-dir app`
+                : `API error: ${msg}`,
+          },
+        ];
+      });
       setLoading(false);
     }
   }
@@ -106,15 +164,19 @@ export function ChatShell() {
 
       <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`max-w-2xl rounded-lg px-4 py-3 text-sm leading-relaxed ${
-              msg.role === "user"
-                ? "ml-auto bg-emerald-600 text-white"
-                : "bg-zinc-100 text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
-            }`}
-          >
-            <MessageContent text={msg.content} />
+          <div key={i} className={msg.role === "user" ? "flex justify-end" : ""}>
+            <div
+              className={`max-w-2xl rounded-lg px-4 py-3 text-sm leading-relaxed ${
+                msg.role === "user"
+                  ? "bg-emerald-600 text-white"
+                  : "bg-zinc-100 text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
+              }`}
+            >
+              <MessageContent text={msg.content} />
+              {msg.role === "assistant" && !msg.streaming && (
+                <CitationsPanel citations={msg.citations ?? []} />
+              )}
+            </div>
           </div>
         ))}
         {loading && (
