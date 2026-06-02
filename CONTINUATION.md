@@ -62,9 +62,9 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | **0** | Monorepo, Qdrant compose, FastAPI skeleton, Next.js chat shell | Done |
 | **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
 | **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather | Done |
-| **3** | Claude agent loop — conversational, multi-turn, streaming SSE | **Done** |
-| **4** | Frontend: multi-turn history in Next.js chat shell | **Next** |
-| **5** | Golden Q&A tests + investor response schema | Pending |
+| **3** | Claude agent loop — conversational, multi-turn, streaming SSE | Done |
+| **4** | Frontend: multi-turn history in Next.js chat shell | **Done** |
+| **5** | Golden Q&A tests + investor response schema | **Next** |
 | **6** | Chat UI citations panel + SSE streaming | Pending |
 | **7** | Earnings dashboard (EPS surprises, guidance trends) | Pending |
 
@@ -82,16 +82,19 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 - Multi-turn history — `ChatRequest.history: list[HistoryMessage]` passed to `run_agent`
 - Tool calls: `get_stock_quote`, `get_earnings_history`, `search_sec_filings`, `get_filing_content`, `search_news`, `get_news_sentiment`, `search_docs` (7 tools)
 - Forced final synthesis when agent exhausts `claude_max_tool_rounds` (uses `tool_choice={"type": "none"}`)
+- Frontend sends `history` with every request — full multi-turn context in the browser
+- `**bold**` and `\n` rendered in chat bubbles without new npm packages
+- Animated bouncing dots loading indicator
 
 ### Validated live response quality (2026-06-02)
 
 **Prompt:** "How is Apple performing?"
-**Response (agent):** 3-sentence prose — price, earnings beat streak, WWDC catalyst — ends with follow-up offer. No tables, no headers, no emojis. Cites source inline. Matches ChatGPT/Claude style.
+**Response:** 3-sentence prose — price, earnings beat streak, WWDC catalyst — ends with follow-up offer. No tables, no headers. Cites source inline. Matches ChatGPT/Claude style.
 
 **Prompt:** "How is Nvidia performing after recent product launch?"
-**Response (agent):** Short paragraph covering RTX Spark superchip launch, stock move, CEO quote on Vera CPUs. Relevant, timely, cites Forbes/quote data. Ends with research disclaimer.
+**Response:** Short paragraph covering RTX Spark superchip, stock move, CEO quote on Vera CPUs. Relevant, timely, cites source. Ends with research disclaimer.
 
-### Key files (Phase 3)
+### Key files
 
 | File | Role |
 |------|------|
@@ -100,6 +103,7 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | `apps/api/app/agent/loop.py` | `run_agent(message, ticker, settings, history)` — tool_use loop |
 | `apps/api/app/routes/chat.py` | `/chat` + `/chat/stream`; history wired; no ticker gate in agent path |
 | `apps/api/app/config.py` | `claude_model`, `claude_max_tokens=4096`, `claude_max_tool_rounds=5` |
+| `apps/web/src/components/ChatShell.tsx` | Multi-turn history, `MessageContent` markdown renderer, loading dots |
 
 ---
 
@@ -122,17 +126,44 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ---
 
-## Next — Phase 4: Frontend multi-turn history
+## Next — Phase 5: Golden Q&A tests + investor response schema
 
-The backend fully supports `history` in `ChatRequest`. The frontend (`apps/web`) still sends every message without prior turns, so the agent starts fresh each time.
+Validate answer quality against the golden question set and introduce a structured response format.
 
-**What to build:**
-- `apps/web/src/components/ChatShell.tsx` — maintain `messages` state as array; send `history` (all prior `{role, content}` pairs) with every POST request
-- The backend already accepts it — this is a pure frontend change
+**Step 1 — `app/agent/schema.py`**
+```python
+class Citation(BaseModel):
+    accession_number: str
+    date: str
+    form_type: str
+    excerpt: str | None = None
+    source_url: str = ""
+
+class KeyNumber(BaseModel):
+    label: str       # e.g. "Q4 2025 EPS"
+    value: str       # e.g. "$1.29"
+    vs_estimate: str | None = None  # e.g. "+5.9%"
+
+class InvestorResponse(BaseModel):
+    answer: str
+    key_numbers: list[KeyNumber] = []
+    citations: list[Citation] = []
+    sentiment: str | None = None
+    disclaimer: str = "This is for research only, not investment advice."
+```
+
+**Step 2 — `tests/test_golden_qa.py`** (skipped without `ANTHROPIC_API_KEY`)
+
+| Question | Must contain | Must NOT contain |
+|----------|-------------|-----------------|
+| "Did Apple file a material 8-K in the last 90 days?" | citation with `form_type="8-K"`, date in answer | vague "I don't know" |
+| "What were NVDA's last 4 quarters EPS vs estimates?" | 4 EPS numbers, surprise % | empty answer |
+| "What is Google's current stock price?" | price value | "unavailable" without fallback |
+| "Should I buy Apple stock?" | disclaimer | direct buy/sell recommendation |
 
 **What NOT to do yet:**
-- Citations panel (Phase 6)
-- SSE streaming in UI (Phase 6)
+- Citations panel UI (Phase 6)
+- SSE streaming in frontend (Phase 6)
 - Earnings dashboard (Phase 7)
 
 ---

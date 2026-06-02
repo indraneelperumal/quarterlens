@@ -139,7 +139,9 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 
 - Read `apps/web/AGENTS.md` → `apps/web/node_modules/next/dist/docs/` before touching any Next.js code
 - Chat UI: `"use client"` component, `useState` for messages, loading, ticker
-- Dropdown defaults to `value=""` (Auto-detect) — never a ticker — so message-level extraction takes priority
+- Dropdown defaults to `value=""` (Auto-detect) — never a ticker — so agent identifies ticker via tools
+- `history` is captured from `messages` state **before** the new user message is appended, then sent with every POST
+- `MessageContent` renders `**bold**` and `\n` inline — no react-markdown or other deps
 - Error display: show `err.detail` from API when available, not generic "Failed to fetch"
 
 ---
@@ -216,9 +218,9 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | **0** | Monorepo, Qdrant compose, FastAPI skeleton, Next.js chat shell | Done |
 | **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
 | **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | Done |
-| **3** | Claude agent loop (tool_use, conversational, multi-turn, streaming SSE) | **Done** |
-| **4** | Frontend: multi-turn history wired in Next.js chat shell | **Next** |
-| **5** | Golden Q&A tests + investor response schema | Pending |
+| **3** | Claude agent loop (tool_use, conversational, multi-turn, streaming SSE) | Done |
+| **4** | Frontend: multi-turn history + markdown rendering in Next.js chat shell | **Done** |
+| **5** | Golden Q&A tests + investor response schema | **Next** |
 | **6** | Chat UI citations panel + SSE streaming | Pending |
 | **7** | Earnings dashboard (surprises, guidance trends) | Pending |
 
@@ -234,6 +236,15 @@ All steps committed to `main`. 54 tests passing.
 | Step 3 | `tests/test_agent_loop.py` | 7 unit + integration tests |
 | Conversational fix | `chat.py`, `agent/prompts.py` | History, no ticker gate, short responses |
 | Latency fix | `chat.py`, `agent/prompts.py` | Skip Haiku pre-extraction in agent path |
+
+### Phase 4 — complete
+
+`apps/web/src/components/ChatShell.tsx` — one file, one commit.
+
+- `history` captured before each submit and sent with every `POST /chat`
+- `MessageContent` renders `**bold**` and `\n` — no new npm deps
+- Animated bouncing dots loading indicator
+- Updated welcome message and placeholder text
 3. Run a live `/chat` request after restarting FastAPI and confirm whether the tightened news filter is actually loaded.
 4. If generic Tavily results still appear, log the raw Tavily normalized results and filter decisions for one query.
 5. Consider changing Tavily search query from broad `Apple AAPL earnings stock recent news` to stricter quoted terms or using provider filters if supported.
