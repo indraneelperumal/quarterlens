@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date, timedelta
 from functools import partial
 from typing import Any
@@ -17,6 +18,32 @@ from app.rag.store import VectorStore
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 log = logging.getLogger(__name__)
+
+_COMPANY_TERMS: dict[str, tuple[str, ...]] = {
+    "AAPL": ("apple", "aapl"),
+    "GOOGL": ("alphabet", "google", "googl"),
+    "MSFT": ("microsoft", "msft"),
+    "NVDA": ("nvidia", "nvda"),
+    "AMZN": ("amazon", "amzn"),
+    "JPM": ("jpmorgan", "jp morgan", "jpm"),
+    "UNH": ("unitedhealth", "united health", "unh"),
+    "XOM": ("exxon", "exxonmobil", "xom"),
+    "COST": ("costco",),
+}
+_NEWS_CONTEXT_TERMS = (
+    "earnings",
+    "revenue",
+    "profit",
+    "eps",
+    "shares",
+    "stock",
+    "investor",
+    "analyst",
+    "forecast",
+    "guidance",
+    "quarter",
+    "results",
+)
 
 
 class ChatRequest(BaseModel):
@@ -81,12 +108,13 @@ def _qdrant_search(vector: list[float], ticker: str) -> list[dict]:
 
 
 async def _market_snapshot(ticker: str) -> dict[str, Any]:
-    if not settings.fmp_api_key:
+    api_key = settings.fmp_api_key.strip()
+    if not api_key:
         return {}
     quote, earnings, metrics = await asyncio.gather(
-        market_client.get_quote(ticker, api_key=settings.fmp_api_key),
-        market_client.get_earnings_history(ticker, limit=4, api_key=settings.fmp_api_key),
-        market_client.get_key_metrics_ttm(ticker, api_key=settings.fmp_api_key),
+        market_client.get_quote(ticker, api_key=api_key),
+        market_client.get_earnings_history(ticker, limit=4, api_key=api_key),
+        market_client.get_key_metrics_ttm(ticker, api_key=api_key),
         return_exceptions=True,
     )
     return {
@@ -102,14 +130,24 @@ async def _market_snapshot(ticker: str) -> dict[str, Any]:
 
 
 async def _news_context(message: str, ticker: str) -> dict[str, Any]:
-    query = f"{ticker} {message}"
+    api_key = settings.tavily_api_key.strip()
+    company_terms = _COMPANY_TERMS.get(ticker.upper(), ())
+    company_name = company_terms[0] if company_terms else ticker.upper()
+    query = f"{company_name} {ticker} earnings stock recent news"
     tavily_results, sentiment = await asyncio.gather(
-        news.search_news(query, api_key=settings.tavily_api_key, max_results=5),
-        news.get_news_sentiment(ticker, api_key=settings.alpha_vantage_api_key, limit=5),
+        news.search_news(query, api_key=api_key, max_results=8),
+        news.get_news_sentiment(
+            ticker, api_key=settings.alpha_vantage_api_key.strip(), limit=5
+        ),
         return_exceptions=True,
     )
+    filtered_news = (
+        []
+        if isinstance(tavily_results, Exception)
+        else _filter_relevant_news(tavily_results, ticker)
+    )
     return {
-        "news": [] if isinstance(tavily_results, Exception) else tavily_results,
+        "news": filtered_news[:5],
         "sentiment": (
             {"ticker": ticker, "articles": [], "count": 0}
             if isinstance(sentiment, Exception)
@@ -120,6 +158,32 @@ async def _news_context(message: str, ticker: str) -> dict[str, Any]:
             "sentiment": str(sentiment) if isinstance(sentiment, Exception) else None,
         },
     }
+
+
+def _filter_relevant_news(items: list[dict], ticker: str) -> list[dict]:
+    terms = _COMPANY_TERMS.get(ticker.upper(), ())
+    relevant: list[dict] = []
+    for item in items:
+        raw_haystack = " ".join(
+            str(item.get(field, ""))
+            for field in ("title", "content", "url", "source")
+        )
+        haystack = raw_haystack.lower()
+        has_company = _contains_ticker(raw_haystack, ticker) or any(
+            _contains_term(haystack, term) for term in terms
+        )
+        has_market_context = any(_contains_term(haystack, term) for term in _NEWS_CONTEXT_TERMS)
+        if has_company and has_market_context:
+            relevant.append(item)
+    return relevant
+
+
+def _contains_ticker(text: str, ticker: str) -> bool:
+    return re.search(rf"(?<![A-Z0-9]){re.escape(ticker.upper())}(?![A-Z0-9])", text) is not None
+
+
+def _contains_term(text: str, term: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", text) is not None
 
 
 def _fmt_number(value: Any) -> str:
@@ -216,10 +280,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     market_data = {} if isinstance(market_data, Exception) else market_data
     news_data = {} if isinstance(news_data, Exception) else news_data
+    has_fmp_key = bool(settings.fmp_api_key.strip())
+    has_tavily_key = bool(settings.tavily_api_key.strip())
+    has_alpha_vantage_key = bool(settings.alpha_vantage_api_key.strip())
 
     quote = market_data.get("quote")
     earnings_history = market_data.get("earnings_history", [])
     key_metrics = market_data.get("key_metrics_ttm")
+    market_errors = market_data.get("errors", {})
     news_items = news_data.get("news", [])
     sentiment = news_data.get("sentiment", {"ticker": ticker, "articles": [], "count": 0})
 
@@ -245,8 +313,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             f"({_fmt_number(quote.get('changesPercentage'))}%); "
             f"market cap: {_fmt_number(quote.get('marketCap'))}"
         )
-    elif settings.fmp_api_key:
-        lines.append("Market snapshot unavailable.")
+    elif has_fmp_key:
+        error = market_errors.get("quote") if isinstance(market_errors, dict) else None
+        lines.append(
+            "Market snapshot unavailable."
+            + (f" Quote error: {error}" if error else "")
+        )
 
     if earnings_history:
         lines.append("Recent earnings history:")
@@ -276,8 +348,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
             published = item.get("published_date", "")
             suffix = " - ".join(part for part in (source, published) if part)
             lines.append(f"  • {title}" + (f" ({suffix})" if suffix else ""))
-    elif settings.tavily_api_key:
-        lines.append("Recent news unavailable.")
+    elif has_tavily_key:
+        lines.append(f"No ticker-specific recent news found for {ticker}.")
 
     sentiment_articles = sentiment.get("articles", []) if isinstance(sentiment, dict) else []
     if sentiment_articles:
@@ -290,7 +362,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         lines.append(
             f"News sentiment: {len(sentiment_articles)} article(s), recent labels: {label_summary}"
         )
-    elif settings.alpha_vantage_api_key:
+    elif has_alpha_vantage_key:
         lines.append("News sentiment unavailable.")
 
     if chunks:
@@ -301,11 +373,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
     elif qdrant_error:
         lines.append(f"(Vector search unavailable: {qdrant_error})")
 
-    if not settings.fmp_api_key:
+    if not has_fmp_key:
         lines.append("(Market data unavailable: FMP_API_KEY is not configured.)")
-    if not settings.tavily_api_key:
+    if not has_tavily_key:
         lines.append("(Recent news unavailable: TAVILY_API_KEY is not configured.)")
-    if not settings.alpha_vantage_api_key:
+    if not has_alpha_vantage_key:
         lines.append("(News sentiment unavailable: ALPHA_VANTAGE_API_KEY is not configured.)")
 
     sources = _build_sources(filings, chunks, news_items)

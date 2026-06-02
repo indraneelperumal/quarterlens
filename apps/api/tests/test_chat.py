@@ -172,6 +172,137 @@ def test_chat_degrades_when_sources_fail(monkeypatch) -> None:
     assert "ALPHA_VANTAGE_API_KEY is not configured" in reply
 
 
+def test_chat_shows_market_error_when_key_is_configured(monkeypatch) -> None:
+    async def fake_resolve_ticker(message: str, hint: str | None) -> str:
+        return "AAPL"
+
+    async def fake_recent_filings(ticker: str):
+        return [], None
+
+    async def fake_search_filing_chunks(message: str, ticker: str):
+        return [], None
+
+    async def fake_market_snapshot(ticker: str):
+        return {
+            "quote": None,
+            "earnings_history": [],
+            "key_metrics_ttm": None,
+            "errors": {"quote": "FMP plan limit or bad key"},
+        }
+
+    async def fake_news_context(message: str, ticker: str):
+        return {"news": [], "sentiment": {"ticker": ticker, "articles": [], "count": 0}}
+
+    monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
+    monkeypatch.setattr(chat_route, "_recent_filings", fake_recent_filings)
+    monkeypatch.setattr(chat_route, "_search_filing_chunks", fake_search_filing_chunks)
+    monkeypatch.setattr(chat_route, "_market_snapshot", fake_market_snapshot)
+    monkeypatch.setattr(chat_route, "_news_context", fake_news_context)
+    monkeypatch.setattr(chat_route.settings, "fmp_api_key", "fmp-test")
+    monkeypatch.setattr(chat_route.settings, "tavily_api_key", "")
+    monkeypatch.setattr(chat_route.settings, "alpha_vantage_api_key", "")
+
+    response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
+
+    assert response.status_code == 200
+    reply = response.json()["reply"]
+    assert "Market snapshot unavailable. Quote error: FMP plan limit or bad key" in reply
+
+
+def test_filter_relevant_news_keeps_ticker_specific_items() -> None:
+    results = chat_route._filter_relevant_news(
+        [
+            {
+                "title": "Friday's big stock stories",
+                "content": "General market setup.",
+                "url": "https://example.com/market",
+                "source": "Example",
+            },
+            {
+                "title": "The 15 best laptops to buy in 2026",
+                "content": "Includes Apple MacBook, Microsoft Surface, and other laptops.",
+                "url": "https://example.com/laptops",
+                "source": "Example",
+            },
+            {
+                "title": "Apple shares rise after earnings",
+                "content": "AAPL revenue beat expectations.",
+                "url": "https://example.com/apple",
+                "source": "Example",
+            },
+        ],
+        "AAPL",
+    )
+
+    assert [item["title"] for item in results] == ["Apple shares rise after earnings"]
+
+
+def test_filter_relevant_news_avoids_substring_false_positive() -> None:
+    results = chat_route._filter_relevant_news(
+        [
+            {
+                "title": "Rising labor cost weighs on retail stocks",
+                "content": "Analysts say higher wages may pressure shares across the sector.",
+                "url": "https://example.com/retail-cost",
+                "source": "Example",
+            },
+            {
+                "title": "Costco shares rise after earnings",
+                "content": "COST revenue and EPS beat analyst expectations.",
+                "url": "https://example.com/costco",
+                "source": "Example",
+            },
+        ],
+        "COST",
+    )
+
+    assert [item["title"] for item in results] == ["Costco shares rise after earnings"]
+
+
+def test_filter_relevant_news_keeps_uppercase_ticker_only_headline() -> None:
+    results = chat_route._filter_relevant_news(
+        [
+            {
+                "title": "COST revenue beats estimates",
+                "content": "Shares rose after quarterly results topped analyst expectations.",
+                "url": "https://example.com/earnings",
+                "source": "Example",
+            },
+            {
+                "title": "Labor cost weighs on retail stocks",
+                "content": "Analysts discuss wage pressure across retail.",
+                "url": "https://example.com/labor",
+                "source": "Example",
+            },
+        ],
+        "COST",
+    )
+
+    assert [item["title"] for item in results] == ["COST revenue beats estimates"]
+
+
+def test_filter_relevant_news_unknown_ticker_requires_uppercase_token() -> None:
+    results = chat_route._filter_relevant_news(
+        [
+            {
+                "title": "Cat food maker shares rise after earnings",
+                "content": "A pet food stock moved after quarterly results.",
+                "url": "https://example.com/cat-food",
+                "source": "Example",
+            },
+            {
+                "title": "CAT revenue beats estimates",
+                "content": "Shares rose after quarterly results.",
+                "url": "https://example.com/cat",
+                "source": "Example",
+            },
+        ],
+        "CAT",
+    )
+
+    assert [item["title"] for item in results] == ["CAT revenue beats estimates"]
+
+
 def test_chat_handles_partial_filing_payloads(monkeypatch) -> None:
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "AAPL"
