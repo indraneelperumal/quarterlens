@@ -67,23 +67,28 @@ class ChatResponse(BaseModel):
 
 
 async def _resolve_ticker(message: str, hint: str | None) -> str | None:
-    """Return uppercase ticker: message extraction → hint fallback → None.
+    """Return uppercase ticker hint for agent context, or None.
 
-    Message extraction takes priority so that typing "nvidia" overrides a
-    stale dropdown selection. The hint is the fallback for generic queries
-    like "what happened recently?" where no company is named.
+    When the agent loop is active it identifies tickers itself via tool calls,
+    so we skip the separate Haiku extraction to avoid a redundant round-trip.
+    The hint (dropdown selection) is still passed so the agent has a head start.
+    For the Phase 2 formatter (no agent key), Haiku extraction is still used.
     """
     if settings.anthropic_api_key:
-        try:
-            import anthropic
-            from app.utils.ticker_resolver import extract_tickers
+        # Agent handles its own ticker identification — just pass the UI hint
+        return hint.upper() if hint else None
 
-            ac = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-            tickers = await extract_tickers(message, ac)
-            if tickers:
-                return tickers[0]
-        except Exception as exc:
-            log.warning("Ticker extraction failed: %s", exc)
+    # Phase 2 path: use Haiku to extract ticker from message text
+    try:
+        import anthropic
+        from app.utils.ticker_resolver import extract_tickers
+
+        ac = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        tickers = await extract_tickers(message, ac)
+        if tickers:
+            return tickers[0]
+    except Exception as exc:
+        log.warning("Ticker extraction failed: %s", exc)
     if hint:
         return hint.upper()
     return None
