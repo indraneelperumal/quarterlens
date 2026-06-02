@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,11 +21,19 @@ def _clamp(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 
+def _domain_from_url(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or url
+        return host.removeprefix("www.")
+    except Exception:
+        return url
+
+
 def _normalize_tavily_result(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": item.get("title", ""),
         "url": item.get("url", ""),
-        "source": item.get("source") or item.get("url", ""),
+        "source": item.get("source") or _domain_from_url(item.get("url", "")),
         "published_date": item.get("published_date") or item.get("published_time", ""),
         "content": item.get("content", ""),
         "score": item.get("score"),

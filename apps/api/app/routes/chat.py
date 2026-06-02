@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from datetime import date, timedelta
 from functools import partial
@@ -196,6 +197,37 @@ def _fmt_number(value: Any) -> str:
     return str(value)
 
 
+def _fmt_large(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(v):
+        return "n/a"
+    a = abs(v)
+    if a >= 1e12:
+        return f"${v / 1e12:.2f}T"
+    if a >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if a >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    return f"${v:,.2f}"
+
+
+def _fmt_pub_date(raw: str) -> str:
+    """Trim RFC 2822 dates like 'Thu, 28 May 2026 23:49:51 GMT' to '28 May 2026'.
+    Returns the raw string unchanged for any format without a leading weekday comma.
+    """
+    if not raw:
+        return ""
+    if "," not in raw:
+        return raw
+    after_comma = raw.split(",", 1)[1].strip()
+    return " ".join(after_comma.split()[:3])
+
+
 def _build_sources(filings: list[dict], chunks: list[dict], news_items: list[dict]) -> list[dict]:
     sources: list[dict] = []
     for f in filings:
@@ -311,7 +343,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             f"Price: ${_fmt_number(quote.get('price'))}; "
             f"change: {_fmt_number(quote.get('change'))} "
             f"({_fmt_number(quote.get('changesPercentage'))}%); "
-            f"market cap: {_fmt_number(quote.get('marketCap'))}"
+            f"market cap: {_fmt_large(quote.get('marketCap'))}"
         )
     elif has_fmp_key:
         error = market_errors.get("quote") if isinstance(market_errors, dict) else None
@@ -345,7 +377,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         for item in news_items[:5]:
             title = item.get("title") or item.get("url", "Untitled")
             source = item.get("source", "")
-            published = item.get("published_date", "")
+            published = _fmt_pub_date(item.get("published_date", ""))
             suffix = " - ".join(part for part in (source, published) if part)
             lines.append(f"  • {title}" + (f" ({suffix})" if suffix else ""))
     elif has_tavily_key:

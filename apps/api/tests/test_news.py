@@ -87,7 +87,7 @@ async def test_search_news_posts_tavily_request_and_normalizes(monkeypatch) -> N
         {
             "title": "Apple earnings rise",
             "url": "https://example.com/apple",
-            "source": "https://example.com/apple",
+            "source": "example.com",
             "published_date": "2026-01-31",
             "content": "Apple reported stronger earnings.",
             "score": 0.91,
