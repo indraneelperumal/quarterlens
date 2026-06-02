@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, Fragment, useState } from "react";
 
 const WATCHLIST = ["AAPL", "GOOGL", "MSFT", "NVDA", "AMZN", "JPM", "UNH", "XOM", "COST"];
 
@@ -8,12 +8,31 @@ type Message = { role: "user" | "assistant"; content: string };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+/** Render plain text with **bold** and newline support — no extra deps. */
+function MessageContent({ text }: { text: string }) {
+  return (
+    <>
+      {text.split("\n").map((line, li) => (
+        <Fragment key={li}>
+          {li > 0 && <br />}
+          {line.split(/(\*\*[^*]+\*\*)/).map((part, pi) =>
+            part.startsWith("**") && part.endsWith("**") ? (
+              <strong key={pi}>{part.slice(2, -2)}</strong>
+            ) : (
+              <span key={pi}>{part}</span>
+            )
+          )}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content:
-        "Earnings Intelligence Agent (MVP C). Ask about filings, guidance vs results, or recent material events. Phase 3 will connect live MCP + RAG.",
+      content: "Hey! Ask me anything about a stock — earnings, recent filings, price, news. I'll pull the latest data.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -25,6 +44,9 @@ export function ChatShell() {
     const text = input.trim();
     if (!text || loading) return;
 
+    // Capture history before adding the new user message
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+
     setInput("");
     setMessages((m) => [...m, { role: "user", content: text }]);
     setLoading(true);
@@ -33,7 +55,7 @@ export function ChatShell() {
       const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, ticker: ticker || null }),
+        body: JSON.stringify({ message: text, ticker: ticker || null, history }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -51,7 +73,7 @@ export function ChatShell() {
           content:
             msg === "Failed to fetch"
               ? `Could not reach API at ${API_URL}. Start FastAPI: cd apps/api && uvicorn app.main:app --reload --reload-dir app`
-              : `API error: ${msg}. Use POST ${API_URL}/chat (not GET /). Health check: ${API_URL}/health`,
+              : `API error: ${msg}`,
         },
       ]);
     } finally {
@@ -92,11 +114,18 @@ export function ChatShell() {
                 : "bg-zinc-100 text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
             }`}
           >
-            {msg.content}
+            <MessageContent text={msg.content} />
           </div>
         ))}
         {loading && (
-          <p className="text-sm text-zinc-500 dark:text-zinc-400">Thinking…</p>
+          <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
+            <span className="inline-flex gap-1">
+              <span className="animate-bounce [animation-delay:0ms]">•</span>
+              <span className="animate-bounce [animation-delay:150ms]">•</span>
+              <span className="animate-bounce [animation-delay:300ms]">•</span>
+            </span>
+            Thinking…
+          </div>
         )}
       </div>
 
@@ -108,7 +137,7 @@ export function ChatShell() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g. Did Apple file a material 8-K recently?"
+          placeholder="Ask about any stock, filing, or earnings…"
           className="flex-1 rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
           disabled={loading}
         />
