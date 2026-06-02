@@ -97,7 +97,7 @@ async def _recent_filings(ticker: str) -> tuple[list[dict], str | None]:
 
 async def _search_filing_chunks(message: str, ticker: str) -> tuple[list[dict], str | None]:
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         vec = await loop.run_in_executor(None, partial(embed_texts, [message]))
         chunks = await loop.run_in_executor(None, partial(_qdrant_search, vec[0], ticker))
         return chunks, None
