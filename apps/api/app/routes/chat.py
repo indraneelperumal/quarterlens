@@ -4,12 +4,14 @@ import asyncio
 import logging
 from datetime import date, timedelta
 from functools import partial
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.mcp import client as mcp_client
+from app.mcp import market_client, news
 from app.rag.embedder import embed_texts
 from app.rag.store import VectorStore
 
@@ -50,79 +52,100 @@ async def _resolve_ticker(message: str, hint: str | None) -> str | None:
     return None
 
 
-@router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
-    """Phase 1: MCP filing lookup + Qdrant RAG. Claude synthesis added in Phase 3."""
-
-    # ── 1. Ticker resolution ────────────────────────────────────────────────
-    ticker = await _resolve_ticker(request.message, request.ticker)
-    if not ticker:
-        return ChatResponse(
-            reply=(
-                "Could not identify a company ticker in your message. "
-                "Include a ticker hint (e.g. AAPL) or name the company clearly."
-            ),
-            sources=[],
-        )
-
-    # ── 2. MCP: recent 8-K filings filtered to last 90 days ────────────────
-    filings: list[dict] = []
-    mcp_error: str | None = None
+async def _recent_filings(ticker: str) -> tuple[list[dict], str | None]:
     cutoff = (date.today() - timedelta(days=90)).isoformat()
-
     try:
         raw = await mcp_client.recent_filings(
             ticker, "8-K", limit=10, user_agent=settings.sec_edgar_user_agent
         )
-        # Explicit None guard — ISO YYYY-MM-DD sorts lexicographically
-        filings = [f for f in raw if f.get("date") and f["date"] >= cutoff]
+        # Explicit None guard - ISO YYYY-MM-DD sorts lexicographically
+        return [f for f in raw if f.get("date") and f["date"] >= cutoff], None
     except Exception as exc:
-        mcp_error = str(exc)
+        return [], str(exc)
 
-    # ── 3. Qdrant: semantic search (CPU-bound encode runs in thread pool) ───
-    chunks: list[dict] = []
-    qdrant_error: str | None = None
 
+async def _search_filing_chunks(message: str, ticker: str) -> tuple[list[dict], str | None]:
     try:
         loop = asyncio.get_event_loop()
-        vec = await loop.run_in_executor(None, partial(embed_texts, [request.message]))
-        vec = vec[0]
-        store = VectorStore(settings.qdrant_url)
-        store.ensure_collection()
-        chunks = store.search(vec, limit=5, ticker=ticker, form_type="8-K")
+        vec = await loop.run_in_executor(None, partial(embed_texts, [message]))
+        chunks = await loop.run_in_executor(None, partial(_qdrant_search, vec[0], ticker))
+        return chunks, None
     except Exception as exc:
-        qdrant_error = str(exc)
+        return [], str(exc)
 
-    # ── 4. Format reply ─────────────────────────────────────────────────────
-    lines: list[str] = []
 
-    if filings:
-        lines.append(f"{ticker} filed {len(filings)} 8-K(s) in the last 90 days:\n")
-        for f in filings:
-            desc = f.get("description") or f["accession_number"]
-            lines.append(f"  • {f['date']}  {desc}")
-    elif mcp_error:
-        lines.append(f"Could not fetch filings from EDGAR: {mcp_error}")
-    else:
-        lines.append(f"No 8-K filings found for {ticker} in the last 90 days.")
+def _qdrant_search(vector: list[float], ticker: str) -> list[dict]:
+    store = VectorStore(settings.qdrant_url)
+    store.ensure_collection()
+    return store.search(vector, limit=5, ticker=ticker, form_type="8-K")
 
-    if chunks:
-        lines.append(f"Related context from ingested filings ({len(chunks)} chunk(s)):")
-        for c in chunks[:3]:
-            snippet = c.get("text", "")[:200].replace("\n", " ")
-            lines.append(f"  [{c.get('date', '?')}] {snippet}…")
-    elif qdrant_error:
-        lines.append(f"(Vector search unavailable: {qdrant_error})")
 
-    # ── 5. Build sources from filings + any unique chunk accessions ─────────
-    sources: list[dict] = [
-        {
-            "accession_number": f["accession_number"],
-            "date": f["date"],
-            "form": f.get("form", "8-K"),
-        }
-        for f in filings
-    ]
+async def _market_snapshot(ticker: str) -> dict[str, Any]:
+    if not settings.fmp_api_key:
+        return {}
+    quote, earnings, metrics = await asyncio.gather(
+        market_client.get_quote(ticker, api_key=settings.fmp_api_key),
+        market_client.get_earnings_history(ticker, limit=4, api_key=settings.fmp_api_key),
+        market_client.get_key_metrics_ttm(ticker, api_key=settings.fmp_api_key),
+        return_exceptions=True,
+    )
+    return {
+        "quote": None if isinstance(quote, Exception) else quote,
+        "earnings_history": [] if isinstance(earnings, Exception) else earnings,
+        "key_metrics_ttm": None if isinstance(metrics, Exception) else metrics,
+        "errors": {
+            "quote": str(quote) if isinstance(quote, Exception) else None,
+            "earnings_history": str(earnings) if isinstance(earnings, Exception) else None,
+            "key_metrics_ttm": str(metrics) if isinstance(metrics, Exception) else None,
+        },
+    }
+
+
+async def _news_context(message: str, ticker: str) -> dict[str, Any]:
+    query = f"{ticker} {message}"
+    tavily_results, sentiment = await asyncio.gather(
+        news.search_news(query, api_key=settings.tavily_api_key, max_results=5),
+        news.get_news_sentiment(ticker, api_key=settings.alpha_vantage_api_key, limit=5),
+        return_exceptions=True,
+    )
+    return {
+        "news": [] if isinstance(tavily_results, Exception) else tavily_results,
+        "sentiment": (
+            {"ticker": ticker, "articles": [], "count": 0}
+            if isinstance(sentiment, Exception)
+            else sentiment
+        ),
+        "errors": {
+            "news": str(tavily_results) if isinstance(tavily_results, Exception) else None,
+            "sentiment": str(sentiment) if isinstance(sentiment, Exception) else None,
+        },
+    }
+
+
+def _fmt_number(value: Any) -> str:
+    if value is None or value == "":
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:,.2f}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _build_sources(filings: list[dict], chunks: list[dict], news_items: list[dict]) -> list[dict]:
+    sources: list[dict] = []
+    for f in filings:
+        accession = f.get("accession_number", "")
+        if not accession:
+            continue
+        sources.append(
+            {
+                "accession_number": accession,
+                "date": f.get("date", ""),
+                "form": f.get("form", "8-K"),
+            }
+        )
+
     seen_acc = {s["accession_number"] for s in sources}
     for c in chunks:
         acc = c.get("accession_number", "")
@@ -137,4 +160,153 @@ async def chat(request: ChatRequest) -> ChatResponse:
             )
             seen_acc.add(acc)
 
+    seen_urls: set[str] = set()
+    for item in news_items:
+        url = item.get("url", "")
+        if url and url not in seen_urls:
+            sources.append(
+                {
+                    "type": "news",
+                    "title": item.get("title", ""),
+                    "source_url": url,
+                    "published_date": item.get("published_date", ""),
+                }
+            )
+            seen_urls.add(url)
+    return sources
+
+
+@router.post("", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    """Phase 2: filings + RAG + market data + news. Claude synthesis is Phase 3."""
+
+    # ── 1. Ticker resolution ────────────────────────────────────────────────
+    ticker = await _resolve_ticker(request.message, request.ticker)
+    if not ticker:
+        return ChatResponse(
+            reply=(
+                "Could not identify a company ticker in your message. "
+                "Include a ticker hint (e.g. AAPL) or name the company clearly."
+            ),
+            sources=[],
+        )
+
+    # ── 2. Gather all Phase 2 sources concurrently ─────────────────────────
+    filings_result, chunks_result, market_data, news_data = await asyncio.gather(
+        _recent_filings(ticker),
+        _search_filing_chunks(request.message, ticker),
+        _market_snapshot(ticker),
+        _news_context(request.message, ticker),
+        return_exceptions=True,
+    )
+
+    filings: list[dict] = []
+    mcp_error: str | None = None
+    if isinstance(filings_result, Exception):
+        mcp_error = str(filings_result)
+    else:
+        filings, mcp_error = filings_result
+
+    chunks: list[dict] = []
+    qdrant_error: str | None = None
+    if isinstance(chunks_result, Exception):
+        qdrant_error = str(chunks_result)
+    else:
+        chunks, qdrant_error = chunks_result
+
+    market_data = {} if isinstance(market_data, Exception) else market_data
+    news_data = {} if isinstance(news_data, Exception) else news_data
+
+    quote = market_data.get("quote")
+    earnings_history = market_data.get("earnings_history", [])
+    key_metrics = market_data.get("key_metrics_ttm")
+    news_items = news_data.get("news", [])
+    sentiment = news_data.get("sentiment", {"ticker": ticker, "articles": [], "count": 0})
+
+    # ── 3. Format reply ─────────────────────────────────────────────────────
+    lines: list[str] = []
+
+    if filings:
+        lines.append(f"Recent SEC filings: {ticker} filed {len(filings)} 8-K(s) in the last 90 days:")
+        for f in filings:
+            desc = f.get("description") or f.get("accession_number", "8-K filing")
+            lines.append(f"  • {f.get('date', '?')}  {desc}")
+    elif mcp_error:
+        lines.append(f"Could not fetch filings from EDGAR: {mcp_error}")
+    else:
+        lines.append(f"No 8-K filings found for {ticker} in the last 90 days.")
+
+    if quote:
+        lines.append("Market snapshot:")
+        lines.append(
+            "  • "
+            f"Price: ${_fmt_number(quote.get('price'))}; "
+            f"change: {_fmt_number(quote.get('change'))} "
+            f"({_fmt_number(quote.get('changesPercentage'))}%); "
+            f"market cap: {_fmt_number(quote.get('marketCap'))}"
+        )
+    elif settings.fmp_api_key:
+        lines.append("Market snapshot unavailable.")
+
+    if earnings_history:
+        lines.append("Recent earnings history:")
+        for item in earnings_history[:4]:
+            lines.append(
+                "  • "
+                f"{item.get('date', '?')}: EPS {_fmt_number(item.get('eps'))} "
+                f"vs estimate {_fmt_number(item.get('epsEstimated'))}; "
+                f"surprise {_fmt_number(item.get('surprisePct'))}%"
+            )
+
+    if key_metrics:
+        lines.append("Key metrics TTM:")
+        metrics_bits = [
+            f"P/E: {_fmt_number(key_metrics.get('peRatioTTM'))}",
+            f"P/S: {_fmt_number(key_metrics.get('priceToSalesRatioTTM'))}",
+            f"ROE: {_fmt_number(key_metrics.get('roeTTM'))}",
+            f"Debt/equity: {_fmt_number(key_metrics.get('debtToEquityTTM'))}",
+        ]
+        lines.append("  • " + "; ".join(metrics_bits))
+
+    if news_items:
+        lines.append("Recent news:")
+        for item in news_items[:5]:
+            title = item.get("title") or item.get("url", "Untitled")
+            source = item.get("source", "")
+            published = item.get("published_date", "")
+            suffix = " - ".join(part for part in (source, published) if part)
+            lines.append(f"  • {title}" + (f" ({suffix})" if suffix else ""))
+    elif settings.tavily_api_key:
+        lines.append("Recent news unavailable.")
+
+    sentiment_articles = sentiment.get("articles", []) if isinstance(sentiment, dict) else []
+    if sentiment_articles:
+        labels = [
+            article.get("ticker_sentiment_label") or article.get("overall_sentiment_label")
+            for article in sentiment_articles
+            if article.get("ticker_sentiment_label") or article.get("overall_sentiment_label")
+        ]
+        label_summary = ", ".join(labels[:3]) if labels else "n/a"
+        lines.append(
+            f"News sentiment: {len(sentiment_articles)} article(s), recent labels: {label_summary}"
+        )
+    elif settings.alpha_vantage_api_key:
+        lines.append("News sentiment unavailable.")
+
+    if chunks:
+        lines.append(f"Related context from ingested filings ({len(chunks)} chunk(s)):")
+        for c in chunks[:3]:
+            snippet = c.get("text", "")[:200].replace("\n", " ")
+            lines.append(f"  [{c.get('date', '?')}] {snippet}...")
+    elif qdrant_error:
+        lines.append(f"(Vector search unavailable: {qdrant_error})")
+
+    if not settings.fmp_api_key:
+        lines.append("(Market data unavailable: FMP_API_KEY is not configured.)")
+    if not settings.tavily_api_key:
+        lines.append("(Recent news unavailable: TAVILY_API_KEY is not configured.)")
+    if not settings.alpha_vantage_api_key:
+        lines.append("(News sentiment unavailable: ALPHA_VANTAGE_API_KEY is not configured.)")
+
+    sources = _build_sources(filings, chunks, news_items)
     return ChatResponse(reply="\n".join(lines), sources=sources)
