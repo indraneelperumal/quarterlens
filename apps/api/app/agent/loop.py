@@ -13,17 +13,24 @@ from app.agent.tools import TOOL_DEFINITIONS, execute_tool, safe_json
 log = logging.getLogger(__name__)
 
 
-async def run_agent(message: str, ticker: str | None, settings: Any) -> str:
+async def run_agent(
+    message: str,
+    ticker: str | None,
+    settings: Any,
+    history: list[dict[str, Any]] | None = None,
+) -> str:
     """Run the Claude tool_use loop and return the final synthesised text.
 
+    history: prior conversation turns as [{"role": "user"|"assistant", "content": str}, ...]
     Returns a fallback string if ANTHROPIC_API_KEY is not set.
-    Returns an empty string if Claude produces no text block.
     """
     if not settings.anthropic_api_key:
         return "(Claude synthesis unavailable: ANTHROPIC_API_KEY not set)"
 
     ac = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
+    # Prepend conversation history so the agent has multi-turn context
+    messages: list[dict[str, Any]] = list(history or [])
+    messages.append({"role": "user", "content": message})
 
     response: anthropic.types.Message | None = None
     for round_num in range(settings.claude_max_tool_rounds):

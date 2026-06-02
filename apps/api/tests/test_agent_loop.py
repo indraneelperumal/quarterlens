@@ -161,7 +161,7 @@ def test_chat_endpoint_with_agent(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "AAPL"
 
-    async def fake_run_agent(message: str, ticker, cfg) -> str:
+    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
         return "Investor-grade prose about Apple."
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
@@ -182,7 +182,7 @@ def test_chat_endpoint_agent_exception_falls_back_to_phase2(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "AAPL"
 
-    async def fake_run_agent(message: str, ticker, cfg) -> str:
+    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
         raise RuntimeError("simulated agent failure")
 
     async def fake_recent_filings(ticker: str):
@@ -228,7 +228,7 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "NVDA"
 
-    async def fake_run_agent(message: str, ticker, cfg) -> str:
+    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
         return "NVDA had strong earnings last quarter."
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
@@ -255,13 +255,19 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     assert parsed["text"] == "NVDA had strong earnings last quarter."
 
 
-def test_chat_stream_no_ticker_yields_error_and_done(monkeypatch):
-    """When ticker resolution fails, /stream yields an error chunk then [DONE]."""
+def test_chat_stream_no_ticker_still_calls_agent(monkeypatch):
+    """When ticker resolution fails, /stream still calls run_agent with ticker=None."""
 
     async def fake_resolve_ticker(message: str, hint: str | None) -> None:
         return None
 
+    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
+        assert ticker is None
+        return "I can help with general finance questions too."
+
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
+    monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "test-key")
 
     response = client.post("/chat/stream", json={"message": "What happened recently?"})
 
@@ -271,4 +277,5 @@ def test_chat_stream_no_ticker_yields_error_and_done(monkeypatch):
     data_lines = [
         line[6:] for line in body.splitlines() if line.startswith("data: ") and line != "data: [DONE]"
     ]
-    assert any("ticker" in json.loads(line).get("text", "").lower() for line in data_lines)
+    assert len(data_lines) >= 1
+    assert "general finance" in json.loads(data_lines[0]).get("text", "")

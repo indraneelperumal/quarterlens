@@ -50,9 +50,15 @@ _NEWS_CONTEXT_TERMS = (
 )
 
 
+class HistoryMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., min_length=1)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     ticker: str | None = Field(None, description="Optional ticker hint, e.g. AAPL")
+    history: list[HistoryMessage] = Field(default_factory=list, description="Prior conversation turns")
 
 
 class ChatResponse(BaseModel):
@@ -279,24 +285,28 @@ def _build_sources(filings: list[dict], chunks: list[dict], news_items: list[dic
 async def chat(request: ChatRequest) -> ChatResponse:
     """Phase 3: Claude agent loop synthesis with Phase 2 formatter as fallback."""
 
-    # ── 1. Ticker resolution ────────────────────────────────────────────────
+    # ── 1. Ticker resolution (best-effort; agent can still respond without one) ──
     ticker = await _resolve_ticker(request.message, request.ticker)
-    if not ticker:
-        return ChatResponse(
-            reply=(
-                "Could not identify a company ticker in your message. "
-                "Include a ticker hint (e.g. AAPL) or name the company clearly."
-            ),
-            sources=[],
-        )
+
+    history = [{"role": m.role, "content": m.content} for m in request.history]
 
     # ── 2. Phase 3: Claude agent synthesis (when ANTHROPIC_API_KEY is set) ──
     if settings.anthropic_api_key:
         try:
-            reply = await run_agent(request.message, ticker, settings)
+            reply = await run_agent(request.message, ticker, settings, history=history)
             return ChatResponse(reply=reply, sources=[])
         except Exception as exc:
             log.warning("Agent loop failed, falling back to Phase 2 formatter: %s", exc)
+
+    # ── 3. Phase 2 fallback requires a ticker ──────────────────────────────
+    if not ticker:
+        return ChatResponse(
+            reply=(
+                "I couldn't identify a company in your message. "
+                "Try naming a company or including a ticker (e.g. AAPL)."
+            ),
+            sources=[],
+        )
 
     # ── 3. Phase 2 fallback: gather all sources concurrently ────────────────
     filings_result, chunks_result, market_data, news_data = await asyncio.gather(
@@ -433,12 +443,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
     async def event_generator():
         ticker = await _resolve_ticker(request.message, request.ticker)
-        if not ticker:
-            yield f"data: {json.dumps({'text': 'Could not identify a ticker.'})}\n\n"
-            yield "data: [DONE]\n\n"
-            return
+        history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
-            reply = await run_agent(request.message, ticker, settings)
+            reply = await run_agent(request.message, ticker, settings, history=history)
         except Exception as exc:
             log.warning("Agent loop error in /stream: %s", exc)
             reply = f"Error: {exc}"

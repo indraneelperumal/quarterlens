@@ -341,13 +341,16 @@ def test_chat_handles_partial_filing_payloads(monkeypatch) -> None:
     assert data["sources"] == []
 
 
-def test_chat_no_ticker_returns_helpful_response(monkeypatch) -> None:
+def test_chat_no_ticker_falls_back_to_phase2_message(monkeypatch) -> None:
+    """When no ticker and no API key, Phase 2 fallback returns a helpful message."""
+
     async def fake_resolve_ticker(message: str, hint: str | None) -> None:
         return None
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "")
 
     response = client.post("/chat", json={"message": "What happened recently?"})
 
     assert response.status_code == 200
-    assert "Could not identify a company ticker" in response.json()["reply"]
+    assert "ticker" in response.json()["reply"].lower()
