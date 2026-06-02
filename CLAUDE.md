@@ -188,6 +188,7 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | Qdrant healthcheck fails | No `curl` in official image | Bash TCP probe on `/readyz` |
 | `apps/web/.env.example` gitignored | Clean clone can't set `NEXT_PUBLIC_API_URL` | Narrow ignore to `.env.local` only |
 | Requires Python 3.12 | Fails on macOS 3.10 default | `requires-python = ">=3.10"` |
+| `pytest` without `python -m` | `ModuleNotFoundError: No module named 'app'` | Run as `python -m pytest` from inside `apps/api/` |
 
 ---
 
@@ -197,7 +198,7 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 |-------|-------------|--------|
 | **0** | Monorepo, Qdrant compose, FastAPI skeleton, Next.js chat shell | Done |
 | **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route (Phase 1 format) | Done |
-| **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | In progress — Step 1 done |
+| **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | Done, but response quality/debugging follow-up needed |
 | **3** | Claude agent loop (tool_use, streaming SSE) | Pending |
 | **4** | Golden Q&A tests + investor response schema | Pending |
 | **5** | Chat UI citations panel + SSE | Pending |
@@ -208,10 +209,46 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | Step | File(s) | Status |
 |------|---------|--------|
 | 1 | `packages/mcp-servers/market-data/fmp_client.py` + `requirements.txt` | Done, committed |
-| 2 | `packages/mcp-servers/market-data/server.py` | Next |
-| 3 | `apps/api/app/mcp/market_client.py` + update `config.py` (add `tavily_api_key`) | Pending |
-| 4 | `apps/api/app/mcp/news.py` (Tavily + Alpha Vantage REST) | Pending |
-| 5 | Update `apps/api/app/routes/chat.py` (parallel gather) + `tests/test_market_client.py` | Pending |
+| 2 | `packages/mcp-servers/market-data/server.py` + `tests/test_market_data_server.py` | Done, committed |
+| 3 | `apps/api/app/mcp/market_client.py` + `config.py` + tests | Done, committed |
+| 4 | `apps/api/app/mcp/news.py` (Tavily + Alpha Vantage REST) + tests | Done, committed |
+| 5 | `apps/api/app/routes/chat.py` (parallel gather) + `tests/test_chat.py` | Done, committed |
+
+### Current checkpoint after Phase 2 Step 5
+
+Phase 2 infrastructure is built and wired into `/chat`, but the user-facing answer is still not investor-grade.
+
+Completed code paths:
+- SEC EDGAR MCP continues to provide recent filings.
+- Qdrant RAG continues to provide filing chunks.
+- FMP market-data MCP server and FastAPI-side `market_client.py` are implemented.
+- Tavily search and Alpha Vantage sentiment wrappers are implemented in `apps/api/app/mcp/news.py`.
+- `/chat` now gathers SEC, RAG, FMP, Tavily, and Alpha Vantage concurrently via `asyncio.gather(..., return_exceptions=True)`.
+- Blocking Qdrant `ensure_collection()` / `search()` has been moved into `run_in_executor`.
+- Chat tests cover graceful degradation, partial filing payloads, market/news sections, and news relevance filters.
+
+Observed live UI issue after Step 5:
+- Prompt: `How is Apple doing after recent earnings?`
+- UI still returns a weak formatted answer, not a synthesized investor answer.
+- FMP quote fails with `403 Forbidden` for `/api/v3/quote/AAPL?...`; this usually means the FMP key, plan, endpoint access, or account status needs verification. Do not hide this error; show enough detail during debugging.
+- Tavily still returned generic articles such as broad CNBC market stories and unrelated Microsoft/laptop articles before relevance filtering was tightened.
+- Alpha Vantage sentiment returns labels, but the Phase 2 formatter only prints a shallow label summary.
+- Filing context is useful but still raw snippets.
+
+Response-quality fix attempted after Step 5:
+- `chat.py` adds ticker/company term mapping and market-context filtering for news.
+- Generic lowercase ticker fallback was removed for unknown tickers to avoid false positives like `CAT` matching the word `cat`.
+- `COST` no longer uses lowercase `cost` as a company term; uppercase ticker-token matching preserves `COST revenue beats estimates`.
+- Tests were added for generic Apple laptop article filtering, COST/cost false positives, uppercase ticker-only headlines, and unknown ticker fallback.
+- Latest focused validation reported `38 passed, 1 warning`.
+
+Do not proceed directly to Phase 3 until the live `/chat` quality gap is acknowledged. Recommended next debugging slice:
+1. Verify `.env.example` does not contain real keys. It was seen locally modified with real-looking FMP/Tavily/Alpha values; blank them before any commit.
+2. Verify FMP account/key manually outside MCP, or replace the FMP key if the 403 persists.
+3. Run a live `/chat` request after restarting FastAPI and confirm whether the tightened news filter is actually loaded.
+4. If generic Tavily results still appear, log the raw Tavily normalized results and filter decisions for one query.
+5. Consider changing Tavily search query from broad `Apple AAPL earnings stock recent news` to stricter quoted terms or using provider filters if supported.
+6. Phase 3 Claude synthesis is still needed; Phase 2 formatter is intentionally basic and will not produce high-quality investor prose.
 
 ---
 
@@ -504,8 +541,8 @@ npm run dev
 cd apps/api && source .venv/bin/activate
 python -c "import asyncio; from app.rag.ingest import ingest_ticker; asyncio.run(ingest_ticker('AAPL'))"
 
-# 5. Run tests
-cd apps/api && pytest -q
+# 5. Run tests (must use python -m to fix sys.path for the 'app' package)
+cd apps/api && python -m pytest -q
 ```
 
 ## Valid endpoints

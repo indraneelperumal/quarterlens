@@ -334,7 +334,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         lines.append("Key metrics TTM:")
         metrics_bits = [
             f"P/E: {_fmt_number(key_metrics.get('peRatioTTM'))}",
-            f"P/S: {_fmt_number(key_metrics.get('priceToSalesRatioTTM'))}",
+            f"EV/S: {_fmt_number(key_metrics.get('evToSalesTTM'))}",
             f"ROE: {_fmt_number(key_metrics.get('roeTTM'))}",
             f"Debt/equity: {_fmt_number(key_metrics.get('debtToEquityTTM'))}",
         ]

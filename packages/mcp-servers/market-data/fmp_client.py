@@ -7,7 +7,8 @@ from typing import Any
 
 import httpx
 
-_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+# FMP stable API (replaces legacy /api/v3/ — dropped Aug 2025 for new accounts)
+_FMP_BASE = "https://financialmodelingprep.com/stable"
 
 # FMP free tier: 250 req/day — 3 concurrent keeps burst safe
 _MAX_CONCURRENT = 3
@@ -15,11 +16,11 @@ _MAX_CONCURRENT = 3
 
 class FMPClient:
     """
-    Async client for FMP endpoints:
-      - /quote/{ticker}                       → real-time quote
-      - /historical/earning_calendar/{ticker} → historical EPS with surprise
-      - /earning_calendar                     → upcoming earnings
-      - /key-metrics-ttm/{ticker}             → trailing-12-month metrics
+    Async client for FMP stable endpoints:
+      - /quote                   → real-time quote (symbol query param)
+      - /earnings                → historical EPS with surprise (symbol query param)
+      - /earnings-calendar       → upcoming earnings (client-side date filter)
+      - /key-metrics-ttm         → trailing-12-month metrics (symbol query param)
     """
 
     def __init__(self, api_key: str) -> None:
@@ -66,6 +67,7 @@ class FMPClient:
         """
         merged = {**(params or {}), "apikey": self._api_key}
         url = f"{_FMP_BASE}{path}"
+        resp: httpx.Response | None = None  # explicit init — avoids unbound ref on early error
 
         async with self._get_sem():
             for attempt in range(4):
@@ -89,10 +91,21 @@ class FMPClient:
     # ------------------------------------------------------------------
 
     async def get_quote(self, ticker: str) -> dict[str, Any] | None:
-        """Return real-time quote for *ticker*, or None if not found."""
-        data = await self._get(f"/quote/{ticker.upper()}")
+        """Return real-time quote for *ticker*, or None if not found.
+
+        Uses the stable /quote endpoint (symbol as query param).
+        Adds backward-compat aliases so callers reading old v3 field names work:
+          changePercentage  → also exposed as changesPercentage
+          pe / eps          → None (not in stable free tier)
+        """
+        data = await self._get("/quote", params={"symbol": ticker.upper()})
         if isinstance(data, list) and data:
-            return data[0]
+            record = data[0]
+            # backward-compat: old callers read 'changesPercentage'
+            record.setdefault("changesPercentage", record.get("changePercentage"))
+            record.setdefault("pe", None)   # not in stable free tier
+            record.setdefault("eps", None)  # not in stable free tier
+            return record
         return None
 
     async def get_earnings_history(
@@ -100,25 +113,29 @@ class FMPClient:
         ticker: str,
         limit: int = 4,
     ) -> list[dict[str, Any]]:
-        """
-        Return historical EPS actuals vs estimates for *ticker*.
+        """Return historical EPS actuals vs estimates for *ticker*.
 
-        Adds ``surprisePct`` = (actual − estimate) / |estimate| × 100
-        to each record. Records without both values get ``surprisePct = None``.
-        Slices to *limit* before computing surprise to avoid wasted work.
-        """
-        data = await self._get(f"/historical/earning_calendar/{ticker.upper()}")
+        Uses the stable /earnings endpoint (symbol as query param).
+        Free tier caps at 5 records per request. The endpoint returns both
+        past and future quarters; future quarters have epsActual=null and are
+        filtered out so only historical records are returned.
 
-        # FMP v3 returns a list directly; some versions wrap in {"historical": [...]}
+        Adds backward-compat aliases:
+          epsActual  → also exposed as eps
+          surprisePct = (epsActual - epsEstimated) / |epsEstimated| * 100
+        """
+        # Always request 5 (free-tier max); filter historical below
+        data = await self._get("/earnings", params={"symbol": ticker.upper(), "limit": 5})
+
         if isinstance(data, list):
-            records = data[:limit]
-        elif isinstance(data, dict):
-            records = data.get("historical", [])[:limit]
+            # Filter future quarters (epsActual=None), then slice to requested limit
+            records = [r for r in data if r.get("epsActual") is not None][:limit]
         else:
             records = []
 
         for entry in records:
-            actual = entry.get("eps")
+            entry["eps"] = entry.get("epsActual")  # unconditional alias — authoritative
+            actual = entry.get("epsActual")
             estimated = entry.get("epsEstimated")
             if actual is not None and estimated is not None and estimated != 0:
                 entry["surprisePct"] = round(
@@ -134,12 +151,15 @@ class FMPClient:
         from_date: str,
         to_date: str,
     ) -> list[dict[str, Any]]:
-        """
-        Return upcoming earnings announcements between *from_date* and *to_date*.
+        """Return upcoming earnings announcements between *from_date* and *to_date*.
 
         Dates must be in YYYY-MM-DD format. Raises ValueError on invalid format.
+
+        Note: the stable free tier does not support from/to query params (402)
+        and only returns recent past earnings (~90 days back). Upcoming quarters
+        are not available on the free tier. This method fetches the full calendar
+        and filters client-side so the interface stays consistent.
         """
-        # Guard against malformed dates from LLM tool calls
         try:
             _date.fromisoformat(from_date)
             _date.fromisoformat(to_date)
@@ -148,15 +168,48 @@ class FMPClient:
                 f"Dates must be in YYYY-MM-DD format, got {from_date!r} / {to_date!r}"
             ) from exc
 
-        data = await self._get(
-            "/earning_calendar",
-            params={"from": from_date, "to": to_date},
-        )
-        return data if isinstance(data, list) else []
+        # Free tier: no date range params, past ~90 days only — filter client-side
+        data = await self._get("/earnings-calendar")
+        if not isinstance(data, list):
+            return []
+
+        result = []
+        for r in data:
+            date_str = r.get("date", "")
+            if not date_str:
+                continue
+            try:
+                # Validate ISO format before lexicographic comparison
+                _date.fromisoformat(date_str)
+            except ValueError:
+                continue
+            if from_date <= date_str <= to_date:
+                result.append(r)
+        return result
 
     async def get_key_metrics_ttm(self, ticker: str) -> dict[str, Any] | None:
-        """Return trailing-12-month key metrics for *ticker*, or None."""
-        data = await self._get(f"/key-metrics-ttm/{ticker.upper()}")
+        """Return trailing-12-month key metrics for *ticker*, or None.
+
+        Uses the stable /key-metrics-ttm endpoint (symbol as query param).
+        Adds backward-compat aliases for old v3 field names:
+          returnOnEquityTTM  → also exposed as roeTTM
+          evToSalesTTM       → also exposed as priceToSalesRatioTTM
+          netDebtToEBITDATTM → also exposed as debtToEquityTTM
+          peRatioTTM, pbRatioTTM, revenuePerShareTTM, netIncomePerShareTTM → None
+        """
+        data = await self._get("/key-metrics-ttm", params={"symbol": ticker.upper()})
         if isinstance(data, list) and data:
-            return data[0]
+            record = data[0]
+            # backward-compat aliases for callers using old v3 field names
+            record.setdefault("roeTTM", record.get("returnOnEquityTTM"))
+            # evToSalesTTM is EV/Sales (not Price/Sales); exposed under both names
+            record.setdefault("evToSalesTTM", record.get("evToSalesTTM"))
+            record.setdefault("priceToSalesRatioTTM", record.get("evToSalesTTM"))
+            # not available in stable free tier — set None so callers show "n/a"
+            record.setdefault("debtToEquityTTM", None)   # netDebtToEBITDA ≠ D/E ratio
+            record.setdefault("peRatioTTM", None)
+            record.setdefault("pbRatioTTM", None)
+            record.setdefault("revenuePerShareTTM", None)
+            record.setdefault("netIncomePerShareTTM", None)
+            return record
         return None

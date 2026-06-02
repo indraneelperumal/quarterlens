@@ -26,7 +26,8 @@ DIM = 384
 
 class VectorStore:
     def __init__(self, url: str) -> None:
-        self._client = QdrantClient(url=url)
+        # check_compatibility=False suppresses the client/server minor-version warning
+        self._client = QdrantClient(url=url, check_compatibility=False)
 
     def ensure_collection(self) -> None:
         existing = {c.name for c in self._client.get_collections().collections}

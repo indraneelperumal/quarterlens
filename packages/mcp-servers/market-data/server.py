@@ -110,7 +110,8 @@ async def get_earnings_history(ticker: str, limit: int = 4) -> str:
 
     Args:
         ticker: Stock ticker, e.g. 'AAPL'.
-        limit : Maximum number of records to return. Clamped to 1-12.
+        limit : Maximum number of records to return. Clamped to 1-12, but the
+                free-tier FMP API delivers at most 5 historical quarters.
 
     Returns:
         JSON array of earnings records. Each record includes surprisePct when
