@@ -58,7 +58,7 @@ Comprehensive spec, workflow rules, and lessons learned for every Claude Code se
 |-------|--------|-------|
 | UI | Next.js 16 (App Router) | Tailwind, `"use client"` for chat shell |
 | API | FastAPI (Python 3.10+) | async routes, Pydantic v2 |
-| LLM | Anthropic Claude | Haiku for ticker extraction; Sonnet/Opus for synthesis (Phase 3) |
+| LLM | Anthropic Claude | Sonnet for agent synthesis; Haiku only in Phase 2 fallback ticker extraction |
 | Vector DB | Qdrant (Docker, local :6333) | Collection `financial_docs`, 384-dim cosine |
 | Embeddings | sentence-transformers `all-MiniLM-L6-v2` | Local, no API cost, lazy-loaded via `@lru_cache` |
 | Market data | FMP (primary) + Alpha Vantage (sentiment) | Free tier; 250 req/day FMP |
@@ -112,8 +112,11 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 
 ### Chat route (apps/api/app/routes/chat.py)
 
-- Ticker resolution order: **message extraction FIRST** (via Haiku), hint as fallback
-- CPU-bound embedding must use `run_in_executor` — never block the event loop
+- **Phase 3 (agent active):** `_resolve_ticker` returns only the UI hint (or None) — no Haiku call. Claude identifies tickers itself via tool calls.
+- **Phase 2 fallback:** `_resolve_ticker` uses Haiku extraction → hint → None. Only reached when `ANTHROPIC_API_KEY` is unset.
+- Agent path: no hard ticker gate — agent handles ticker=None gracefully (e.g. general finance questions)
+- `ChatRequest` includes `history: list[HistoryMessage]` for multi-turn context passed to `run_agent`
+- CPU-bound embedding must use `asyncio.get_running_loop().run_in_executor()` — never `get_event_loop()` (deprecated in 3.10+)
 - Call `store.ensure_collection()` before search — first-run safe
 - Date filter guard: `f.get("date") and f["date"] >= cutoff` (None-safe ISO string sort)
 - All external calls (MCP, Qdrant, Claude) wrapped in `try/except` for graceful degradation
@@ -178,6 +181,20 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | `surprisePct` computed before slice | Wasted work on large histories | Slice to `limit` first, then compute |
 | Wrong fallback key in FMP history | Empty list from some endpoints | `data.get("historical", [])` not `"historicalStockList"` |
 | Date not validated in calendar | LLM passes bad format → cryptic error | `_date.fromisoformat()` guard at entry |
+| FMP `/api/v3/` endpoints → 403 | All FMP market calls fail for post-Aug-2025 accounts | Migrate to `/stable/` base URL; query param `symbol=` not path param |
+| `debtToEquityTTM` mapped to wrong field | `netDebtToEBITDA` ≠ D/E ratio (~0.3 vs ~1.5) | `setdefault("debtToEquityTTM", None)` — shows "n/a" honestly |
+| `eps` alias used `setdefault` | If FMP returns `eps` field, alias silently uses wrong value | Unconditional `entry["eps"] = entry.get("epsActual")` |
+| Tavily source shows raw URL | `source` field absent → full URL exposed in chat | `_domain_from_url()` via `urlparse` as fallback |
+| Market cap shown as 13-digit int | `4498884016360` not human-readable | `_fmt_large()` → `$4.50T` / `$456B` / `$78M`; guards `nan`/`inf` |
+| RFC 2822 date in news items | `"Thu, 28 May 2026 23:49:51 GMT"` shown verbatim | `_fmt_pub_date()` trims to `"28 May 2026"`; comma-presence guard |
+| `_safe_json` → wrong form_type in search_docs | Hardcoded `form_type="8-K"` in `_qdrant_search` silently discards 10-K/10-Q | Pass `form_type=None` |
+| `asyncio.get_event_loop()` in async context | Deprecated in 3.10+, raises in 3.12+ | Use `asyncio.get_running_loop()` inside `async def` |
+| Agent max rounds exhausted → empty reply | All 5 rounds use tool_use; no text block produced | Forced final call with `tool_choice={"type": "none"}` after loop |
+| Haiku pre-extraction adds latency | Separate API call before agent starts; ~700ms–1.5s wasted | Skip Haiku in agent path; agent identifies tickers via tools |
+| Agent responses too long / report-style | Claude produces full tables and headers for simple questions | Explicit length rules in system prompt: 3–5 sentences for casual queries |
+| No multi-turn memory | Every request starts fresh; agent repeats already-known context | `history: list[HistoryMessage]` field on `ChatRequest`; prepended to messages |
+| Hard ticker gate blocked general questions | `"could not identify ticker"` error for non-ticker queries | Removed gate in agent path; agent responds to any message |
+| Qdrant client version warning | `check_compatibility` warning on every startup | `QdrantClient(url=url, check_compatibility=False)` |
 
 ### Infrastructure
 
@@ -197,54 +214,26 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | **0** | Monorepo, Qdrant compose, FastAPI skeleton, Next.js chat shell | Done |
-| **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route (Phase 1 format) | Done |
-| **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | Done, but response quality/debugging follow-up needed |
-| **3** | Claude agent loop (tool_use, streaming SSE) | Pending |
-| **4** | Golden Q&A tests + investor response schema | Pending |
-| **5** | Chat UI citations panel + SSE | Pending |
-| **6** | Earnings dashboard (surprises, guidance trends) | Pending |
+| **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
+| **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | Done |
+| **3** | Claude agent loop (tool_use, conversational, multi-turn, streaming SSE) | **Done** |
+| **4** | Frontend: multi-turn history wired in Next.js chat shell | **Next** |
+| **5** | Golden Q&A tests + investor response schema | Pending |
+| **6** | Chat UI citations panel + SSE streaming | Pending |
+| **7** | Earnings dashboard (surprises, guidance trends) | Pending |
 
-### Phase 2 step status
+### Phase 3 — complete
 
-| Step | File(s) | Status |
-|------|---------|--------|
-| 1 | `packages/mcp-servers/market-data/fmp_client.py` + `requirements.txt` | Done, committed |
-| 2 | `packages/mcp-servers/market-data/server.py` + `tests/test_market_data_server.py` | Done, committed |
-| 3 | `apps/api/app/mcp/market_client.py` + `config.py` + tests | Done, committed |
-| 4 | `apps/api/app/mcp/news.py` (Tavily + Alpha Vantage REST) + tests | Done, committed |
-| 5 | `apps/api/app/routes/chat.py` (parallel gather) + `tests/test_chat.py` | Done, committed |
+All steps committed to `main`. 54 tests passing.
 
-### Current checkpoint after Phase 2 Step 5
-
-Phase 2 infrastructure is built and wired into `/chat`, but the user-facing answer is still not investor-grade.
-
-Completed code paths:
-- SEC EDGAR MCP continues to provide recent filings.
-- Qdrant RAG continues to provide filing chunks.
-- FMP market-data MCP server and FastAPI-side `market_client.py` are implemented.
-- Tavily search and Alpha Vantage sentiment wrappers are implemented in `apps/api/app/mcp/news.py`.
-- `/chat` now gathers SEC, RAG, FMP, Tavily, and Alpha Vantage concurrently via `asyncio.gather(..., return_exceptions=True)`.
-- Blocking Qdrant `ensure_collection()` / `search()` has been moved into `run_in_executor`.
-- Chat tests cover graceful degradation, partial filing payloads, market/news sections, and news relevance filters.
-
-Observed live UI issue after Step 5:
-- Prompt: `How is Apple doing after recent earnings?`
-- UI still returns a weak formatted answer, not a synthesized investor answer.
-- FMP quote fails with `403 Forbidden` for `/api/v3/quote/AAPL?...`; this usually means the FMP key, plan, endpoint access, or account status needs verification. Do not hide this error; show enough detail during debugging.
-- Tavily still returned generic articles such as broad CNBC market stories and unrelated Microsoft/laptop articles before relevance filtering was tightened.
-- Alpha Vantage sentiment returns labels, but the Phase 2 formatter only prints a shallow label summary.
-- Filing context is useful but still raw snippets.
-
-Response-quality fix attempted after Step 5:
-- `chat.py` adds ticker/company term mapping and market-context filtering for news.
-- Generic lowercase ticker fallback was removed for unknown tickers to avoid false positives like `CAT` matching the word `cat`.
-- `COST` no longer uses lowercase `cost` as a company term; uppercase ticker-token matching preserves `COST revenue beats estimates`.
-- Tests were added for generic Apple laptop article filtering, COST/cost false positives, uppercase ticker-only headlines, and unknown ticker fallback.
-- Latest focused validation reported `38 passed, 1 warning`.
-
-Do not proceed directly to Phase 3 until the live `/chat` quality gap is acknowledged. Recommended next debugging slice:
-1. Verify `.env.example` does not contain real keys. It was seen locally modified with real-looking FMP/Tavily/Alpha values; blank them before any commit.
-2. Verify FMP account/key manually outside MCP, or replace the FMP key if the 403 persists.
+| Step | Files | Notes |
+|------|-------|-------|
+| Part A polish | `news.py`, `chat.py`, `test_news.py` | `_domain_from_url`, `_fmt_large`, `_fmt_pub_date` |
+| Step 1 | `config.py`, `agent/prompts.py`, `agent/tools.py` | 7 tool defs + executors + `safe_json` |
+| Step 2 | `agent/loop.py`, `chat.py` | `run_agent()` loop, `/chat` wired, `/chat/stream` SSE |
+| Step 3 | `tests/test_agent_loop.py` | 7 unit + integration tests |
+| Conversational fix | `chat.py`, `agent/prompts.py` | History, no ticker gate, short responses |
+| Latency fix | `chat.py`, `agent/prompts.py` | Skip Haiku pre-extraction in agent path |
 3. Run a live `/chat` request after restarting FastAPI and confirm whether the tightened news filter is actually loaded.
 4. If generic Tavily results still appear, log the raw Tavily normalized results and filter decisions for one query.
 5. Consider changing Tavily search query from broad `Apple AAPL earnings stock recent news` to stricter quoted terms or using provider filters if supported.
