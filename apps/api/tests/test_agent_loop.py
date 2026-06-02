@@ -35,12 +35,13 @@ def test_run_agent_no_key_returns_fallback():
         alpha_vantage_api_key = ""
 
     import asyncio
-    result = asyncio.run(
+    text, citations = asyncio.run(
         run_agent("How is Apple doing?", "AAPL", FakeSettings())
     )
-    assert isinstance(result, str)
-    assert len(result) > 0
-    assert "ANTHROPIC_API_KEY" in result
+    assert isinstance(text, str)
+    assert len(text) > 0
+    assert "ANTHROPIC_API_KEY" in text
+    assert citations == []
 
 
 def test_run_agent_uses_tool_results(monkeypatch):
@@ -88,11 +89,11 @@ def test_run_agent_uses_tool_results(monkeypatch):
         instance.messages.create = mock_create
 
         import asyncio
-        result = asyncio.run(
+        text, citations = asyncio.run(
             run_agent("What is Apple's stock price?", "AAPL", FakeSettings())
         )
 
-    assert "210.12" in result
+    assert "210.12" in text
     assert mock_create.call_count == 2
 
 
@@ -139,11 +140,11 @@ def test_run_agent_exhausted_rounds_forces_final_call(monkeypatch):
         instance.messages.create = mock_create
 
         import asyncio
-        result = asyncio.run(
+        text, citations = asyncio.run(
             run_agent("Summarize Apple.", "AAPL", FakeSettings())
         )
 
-    assert result == "Final synthesized answer."
+    assert text == "Final synthesized answer."
     assert mock_create.call_count == 3
     # Last call must include tool_choice={"type": "none"}
     last_kwargs = mock_create.call_args_list[-1].kwargs
@@ -161,8 +162,8 @@ def test_chat_endpoint_with_agent(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "AAPL"
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
-        return "Investor-grade prose about Apple."
+    async def fake_run_agent(message: str, ticker, cfg, history=None):
+        return ("Investor-grade prose about Apple.", [])
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
     monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
@@ -172,8 +173,8 @@ def test_chat_endpoint_with_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["reply"] == "Investor-grade prose about Apple."
-    assert data["sources"] == []
+    assert data["answer"] == "Investor-grade prose about Apple."
+    assert data["citations"] == []
 
 
 def test_chat_endpoint_agent_exception_falls_back_to_phase2(monkeypatch):
@@ -182,7 +183,7 @@ def test_chat_endpoint_agent_exception_falls_back_to_phase2(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "AAPL"
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
+    async def fake_run_agent(message: str, ticker, cfg, history=None):
         raise RuntimeError("simulated agent failure")
 
     async def fake_recent_filings(ticker: str):
@@ -213,8 +214,8 @@ def test_chat_endpoint_agent_exception_falls_back_to_phase2(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     # Phase 2 formatter produces text about AAPL; not an empty string or error
-    assert isinstance(data["reply"], str)
-    assert len(data["reply"]) > 0
+    assert isinstance(data["answer"], str)
+    assert len(data["answer"]) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +229,8 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "NVDA"
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
-        return "NVDA had strong earnings last quarter."
+    async def fake_run_agent(message: str, ticker, cfg, history=None):
+        return ("NVDA had strong earnings last quarter.", [])
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
     monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
@@ -249,10 +250,14 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     data_lines = [
         line[6:] for line in body.splitlines() if line.startswith("data: ") and line != "data: [DONE]"
     ]
-    assert len(data_lines) >= 1
-    parsed = json.loads(data_lines[0])
-    assert "text" in parsed
-    assert parsed["text"] == "NVDA had strong earnings last quarter."
+    # Word-by-word: multiple text events + 1 citations event
+    assert len(data_lines) >= 2
+    text_events = [json.loads(d) for d in data_lines if "text" in json.loads(d)]
+    citations_events = [json.loads(d) for d in data_lines if "citations" in json.loads(d)]
+    full_text = "".join(e["text"] for e in text_events).strip()
+    assert full_text == "NVDA had strong earnings last quarter."
+    assert len(citations_events) == 1
+    assert citations_events[0]["citations"] == []
 
 
 def test_chat_stream_no_ticker_still_calls_agent(monkeypatch):
@@ -261,9 +266,9 @@ def test_chat_stream_no_ticker_still_calls_agent(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> None:
         return None
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None) -> str:
+    async def fake_run_agent(message: str, ticker, cfg, history=None):
         assert ticker is None
-        return "I can help with general finance questions too."
+        return ("I can help with general finance questions too.", [])
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
     monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
@@ -278,4 +283,6 @@ def test_chat_stream_no_ticker_still_calls_agent(monkeypatch):
         line[6:] for line in body.splitlines() if line.startswith("data: ") and line != "data: [DONE]"
     ]
     assert len(data_lines) >= 1
-    assert "general finance" in json.loads(data_lines[0]).get("text", "")
+    text_events = [json.loads(d) for d in data_lines if "text" in json.loads(d)]
+    full_text = "".join(e["text"] for e in text_events)
+    assert "general finance" in full_text

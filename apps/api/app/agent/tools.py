@@ -6,6 +6,7 @@ import json
 from functools import partial
 from typing import Any
 
+from app.agent.schema import Citation
 from app.mcp import client as mcp_client
 from app.mcp import market_client, news
 from app.rag.embedder import embed_texts
@@ -117,6 +118,35 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def extract_citations(tool_name: str, result: Any) -> list[Citation]:
+    """Extract Citation objects from a tool result, if applicable."""
+    if isinstance(result, Exception) or not isinstance(result, list):
+        return []
+    citations: list[Citation] = []
+    if tool_name == "search_sec_filings":
+        for f in result:
+            if not isinstance(f, dict) or not f.get("accession_number"):
+                continue
+            citations.append(Citation(
+                accession_number=f.get("accession_number", ""),
+                date=f.get("date", ""),
+                form_type=f.get("form_type") or f.get("form", "8-K"),
+            ))
+    elif tool_name == "search_docs":
+        for c in result:
+            if not isinstance(c, dict) or not c.get("accession_number"):
+                continue
+            raw_text = c.get("text", "")
+            citations.append(Citation(
+                accession_number=c.get("accession_number", ""),
+                date=c.get("date", ""),
+                form_type=c.get("form_type", ""),
+                excerpt=raw_text[:150] if raw_text else None,
+                source_url=c.get("source_url", ""),
+            ))
+    return citations
 
 
 def safe_json(result: Any) -> str:

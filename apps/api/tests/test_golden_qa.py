@@ -27,7 +27,7 @@ def _ask(question: str, ticker: str | None = None) -> str:
         json={"message": question, "ticker": ticker},
     )
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
-    return resp.json()["reply"]
+    return resp.json()["answer"]
 
 
 def test_apple_8k_filing():

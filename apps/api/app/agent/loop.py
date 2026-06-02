@@ -8,7 +8,8 @@ from typing import Any
 import anthropic
 
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools import TOOL_DEFINITIONS, execute_tool, safe_json
+from app.agent.schema import Citation
+from app.agent.tools import TOOL_DEFINITIONS, execute_tool, extract_citations, safe_json
 
 log = logging.getLogger(__name__)
 
@@ -18,21 +19,22 @@ async def run_agent(
     ticker: str | None,
     settings: Any,
     history: list[dict[str, Any]] | None = None,
-) -> str:
-    """Run the Claude tool_use loop and return the final synthesised text.
+) -> tuple[str, list[Citation]]:
+    """Run the Claude tool_use loop and return (final_text, citations).
 
     history: prior conversation turns as [{"role": "user"|"assistant", "content": str}, ...]
-    Returns a fallback string if ANTHROPIC_API_KEY is not set.
+    Returns a fallback tuple if ANTHROPIC_API_KEY is not set.
     """
     if not settings.anthropic_api_key:
-        return "(Claude synthesis unavailable: ANTHROPIC_API_KEY not set)"
+        return ("(Claude synthesis unavailable: ANTHROPIC_API_KEY not set)", [])
 
     ac = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    # Prepend conversation history so the agent has multi-turn context
     messages: list[dict[str, Any]] = list(history or [])
     messages.append({"role": "user", "content": message})
 
+    all_citations: list[Citation] = []
     response: anthropic.types.Message | None = None
+
     for round_num in range(settings.claude_max_tool_rounds):
         response = await ac.messages.create(
             model=settings.claude_model,
@@ -56,6 +58,9 @@ async def run_agent(
             return_exceptions=True,
         )
 
+        for b, r in zip(tool_blocks, results):
+            all_citations.extend(extract_citations(b.name, r))
+
         messages.append({"role": "assistant", "content": response.content})
         messages.append({
             "role": "user",
@@ -70,9 +75,8 @@ async def run_agent(
         })
 
     if response is None:
-        return ""
+        return ("", [])
 
-    # If we exhausted all tool rounds without a final text response, force one
     if response.stop_reason == "tool_use":
         log.warning("Agent exhausted %d tool rounds; forcing final synthesis", settings.claude_max_tool_rounds)
         response = await ac.messages.create(
@@ -84,7 +88,17 @@ async def run_agent(
             messages=messages,
         )
 
-    return next(
+    text = next(
         (b.text for b in response.content if hasattr(b, "text") and b.text),
         "",
     )
+
+    # Deduplicate citations by accession_number, preserve order
+    seen: set[str] = set()
+    unique_citations: list[Citation] = []
+    for c in all_citations:
+        if c.accession_number and c.accession_number not in seen:
+            seen.add(c.accession_number)
+            unique_citations.append(c)
+
+    return (text, unique_citations)

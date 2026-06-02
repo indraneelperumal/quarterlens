@@ -34,10 +34,10 @@ def test_chat_returns_reply(monkeypatch) -> None:
     response = client.post("/chat", json={"message": "What is AAPL revenue?", "ticker": "AAPL"})
     assert response.status_code == 200
     data = response.json()
-    assert "reply" in data
-    assert isinstance(data["reply"], str)
-    assert len(data["reply"]) > 0
-    assert "sources" in data
+    assert "answer" in data
+    assert isinstance(data["answer"], str)
+    assert len(data["answer"]) > 0
+    assert "citations" in data
 
 
 def test_chat_includes_phase2_market_and_news_sections(monkeypatch) -> None:
@@ -127,7 +127,7 @@ def test_chat_includes_phase2_market_and_news_sections(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    reply = data["reply"]
+    reply = data["answer"]
     assert "Recent SEC filings" in reply
     assert "Market snapshot" in reply
     assert "Recent earnings history" in reply
@@ -135,7 +135,6 @@ def test_chat_includes_phase2_market_and_news_sections(monkeypatch) -> None:
     assert "Recent news" in reply
     assert "News sentiment" in reply
     assert "Related context from ingested filings" in reply
-    assert any(source.get("type") == "news" for source in data["sources"])
 
 
 def test_chat_degrades_when_sources_fail(monkeypatch) -> None:
@@ -167,7 +166,7 @@ def test_chat_degrades_when_sources_fail(monkeypatch) -> None:
     response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
 
     assert response.status_code == 200
-    reply = response.json()["reply"]
+    reply = response.json()["answer"]
     assert "Could not fetch filings from EDGAR: edgar down" in reply
     assert "Vector search unavailable: qdrant down" in reply
     assert "FMP_API_KEY is not configured" in reply
@@ -209,7 +208,7 @@ def test_chat_shows_market_error_when_key_is_configured(monkeypatch) -> None:
     response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
 
     assert response.status_code == 200
-    reply = response.json()["reply"]
+    reply = response.json()["answer"]
     assert "Market snapshot unavailable. Quote error: FMP plan limit or bad key" in reply
 
 
@@ -337,8 +336,8 @@ def test_chat_handles_partial_filing_payloads(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    assert "8-K filing" in data["reply"]
-    assert data["sources"] == []
+    assert "8-K filing" in data["answer"]
+    assert data["citations"] == []
 
 
 def test_chat_no_ticker_falls_back_to_phase2_message(monkeypatch) -> None:
@@ -353,4 +352,4 @@ def test_chat_no_ticker_falls_back_to_phase2_message(monkeypatch) -> None:
     response = client.post("/chat", json={"message": "What happened recently?"})
 
     assert response.status_code == 200
-    assert "ticker" in response.json()["reply"].lower()
+    assert "ticker" in response.json()["answer"].lower()

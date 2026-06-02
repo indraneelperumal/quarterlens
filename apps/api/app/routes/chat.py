@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent.loop import run_agent
+from app.agent.schema import InvestorResponse
 from app.config import settings
 from app.mcp import client as mcp_client
 from app.mcp import market_client, news
@@ -286,8 +287,8 @@ def _build_sources(filings: list[dict], chunks: list[dict], news_items: list[dic
     return sources
 
 
-@router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+@router.post("", response_model=InvestorResponse)
+async def chat(request: ChatRequest) -> InvestorResponse:
     """Phase 3: Claude agent loop synthesis with Phase 2 formatter as fallback."""
 
     # ── 1. Ticker resolution (best-effort; agent can still respond without one) ──
@@ -298,19 +299,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
     # ── 2. Phase 3: Claude agent synthesis (when ANTHROPIC_API_KEY is set) ──
     if settings.anthropic_api_key:
         try:
-            reply = await run_agent(request.message, ticker, settings, history=history)
-            return ChatResponse(reply=reply, sources=[])
+            reply, citations = await run_agent(request.message, ticker, settings, history=history)
+            return InvestorResponse(answer=reply, citations=citations)
         except Exception as exc:
             log.warning("Agent loop failed, falling back to Phase 2 formatter: %s", exc)
 
     # ── 3. Phase 2 fallback requires a ticker ──────────────────────────────
     if not ticker:
-        return ChatResponse(
-            reply=(
+        return InvestorResponse(
+            answer=(
                 "I couldn't identify a company in your message. "
                 "Try naming a company or including a ticker (e.g. AAPL)."
             ),
-            sources=[],
         )
 
     # ── 3. Phase 2 fallback: gather all sources concurrently ────────────────
@@ -438,23 +438,29 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if not has_alpha_vantage_key:
         lines.append("(News sentiment unavailable: ALPHA_VANTAGE_API_KEY is not configured.)")
 
-    sources = _build_sources(filings, chunks, news_items)
-    return ChatResponse(reply="\n".join(lines), sources=sources)
+    return InvestorResponse(answer="\n".join(lines))
 
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """SSE endpoint: yields the agent reply as a single data chunk then [DONE]."""
+    """SSE endpoint: streams the agent reply word-by-word then sends citations."""
 
     async def event_generator():
         ticker = await _resolve_ticker(request.message, request.ticker)
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
-            reply = await run_agent(request.message, ticker, settings, history=history)
+            reply, citations = await run_agent(request.message, ticker, settings, history=history)
         except Exception as exc:
             log.warning("Agent loop error in /stream: %s", exc)
-            reply = f"Error: {exc}"
-        yield f"data: {json.dumps({'text': reply})}\n\n"
+            reply, citations = f"Error: {exc}", []
+
+        words = reply.split(" ")
+        for i, word in enumerate(words):
+            chunk = word + (" " if i < len(words) - 1 else "")
+            yield f"data: {json.dumps({'text': chunk})}\n\n"
+            await asyncio.sleep(0.02)
+
+        yield f"data: {json.dumps({'citations': [c.model_dump() for c in citations]})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
