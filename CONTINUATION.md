@@ -1,6 +1,6 @@
 # Continuation — MCP Earnings Intelligence Agent
 
-**Last updated:** Phase 3 complete. Agent is live, conversational, and producing ChatGPT-quality responses.
+**Last updated:** Phase 6 complete. Citations panel live, SSE streaming active, `InvestorResponse` wired end-to-end.
 **Frozen spec:** Next.js + FastAPI, Qdrant, FMP + AV + Tavily, hybrid MCP+RAG, Claude Sonnet agent loop.
 
 ---
@@ -63,118 +63,77 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
 | **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather | Done |
 | **3** | Claude agent loop — conversational, multi-turn, streaming SSE | Done |
-| **4** | Frontend: multi-turn history in Next.js chat shell | **Done** |
-| **5** | Golden Q&A tests + investor response schema | **Next** |
-| **6** | Chat UI citations panel + SSE streaming | Pending |
-| **7** | Earnings dashboard (EPS surprises, guidance trends) | Pending |
+| **4** | Frontend: multi-turn history in Next.js chat shell | Done |
+| **5** | Golden Q&A tests + investor response schema | Done |
+| **6** | Chat UI citations panel + SSE streaming | **Done** |
+| **7** | Earnings dashboard (EPS surprises, guidance trends) | **Next** |
 
 ---
 
-## Current state — Phase 3 complete (all committed to `main`)
+## Current state — Phase 6 complete (all committed to `main`)
 
-**54 tests passing.**
+**58 tests passing.**
 
 ### What works end-to-end
 
-- `POST /chat` — agent loop active when `ANTHROPIC_API_KEY` set; Phase 2 formatter as fallback
-- `POST /chat/stream` — SSE endpoint (single chunk + `[DONE]`)
-- Ticker-free queries — agent responds to general finance questions without a ticker
-- Multi-turn history — `ChatRequest.history: list[HistoryMessage]` passed to `run_agent`
-- Tool calls: `get_stock_quote`, `get_earnings_history`, `search_sec_filings`, `get_filing_content`, `search_news`, `get_news_sentiment`, `search_docs` (7 tools)
-- Forced final synthesis when agent exhausts `claude_max_tool_rounds` (uses `tool_choice={"type": "none"}`)
-- Frontend sends `history` with every request — full multi-turn context in the browser
-- `**bold**` and `\n` rendered in chat bubbles without new npm packages
-- Animated bouncing dots loading indicator
-
-### Validated live response quality (2026-06-02)
-
-**Prompt:** "How is Apple performing?"
-**Response:** 3-sentence prose — price, earnings beat streak, WWDC catalyst — ends with follow-up offer. No tables, no headers. Cites source inline. Matches ChatGPT/Claude style.
-
-**Prompt:** "How is Nvidia performing after recent product launch?"
-**Response:** Short paragraph covering RTX Spark superchip, stock move, CEO quote on Vera CPUs. Relevant, timely, cites source. Ends with research disclaimer.
+- `POST /chat` — returns `InvestorResponse` (`answer`, `citations`, `key_numbers`, `sentiment`, `disclaimer`)
+- `POST /chat/stream` — SSE: word-by-word text chunks → `{"citations": [...]}` event → `[DONE]`
+- Citations extracted from `search_sec_filings` and `search_docs` tool results, deduplicated by accession number
+- Frontend consumes SSE stream: text appears word-by-word; citations panel appears after `[DONE]`
+- Collapsible "N sources" panel under each assistant reply; form-type badges (8-K=red, 10-K=green, 10-Q=blue)
+- Ticker-free queries — agent responds without a ticker
+- Multi-turn history — full context sent with every request
+- 4 golden Q&A tests pass against live API (skipped without key)
 
 ### Key files
 
 | File | Role |
 |------|------|
-| `apps/api/app/agent/prompts.py` | System prompt — conversational style, length rules, tool selectivity |
-| `apps/api/app/agent/tools.py` | 7 tool definitions + `execute_tool()` + `safe_json()` |
-| `apps/api/app/agent/loop.py` | `run_agent(message, ticker, settings, history)` — tool_use loop |
-| `apps/api/app/routes/chat.py` | `/chat` + `/chat/stream`; history wired; no ticker gate in agent path |
-| `apps/api/app/config.py` | `claude_model`, `claude_max_tokens=4096`, `claude_max_tool_rounds=5` |
-| `apps/web/src/components/ChatShell.tsx` | Multi-turn history, `MessageContent` markdown renderer, loading dots |
+| `apps/api/app/agent/schema.py` | `Citation`, `KeyNumber`, `InvestorResponse` Pydantic models |
+| `apps/api/app/agent/tools.py` | 7 tools + `execute_tool()` + `safe_json()` + `extract_citations()` |
+| `apps/api/app/agent/loop.py` | `run_agent()` → `tuple[str, list[Citation]]` with deduplication |
+| `apps/api/app/routes/chat.py` | `/chat` → `InvestorResponse`; `/chat/stream` → word-by-word SSE + citations |
+| `apps/api/tests/test_golden_qa.py` | 4 golden Q&A tests (skipped without `ANTHROPIC_API_KEY`) |
+| `apps/web/src/components/ChatShell.tsx` | SSE stream reader, streaming bubble, history |
+| `apps/web/src/components/CitationsPanel.tsx` | Collapsible "N sources" toggle |
+| `apps/web/src/components/SourceCard.tsx` | Form badge, date, excerpt, EDGAR link |
 
 ---
 
-## Bugs fixed this session
+## Bugs fixed (Phase 5 & 6)
 
 | Bug | Fix |
 |-----|-----|
-| FMP `/api/v3/` → 403 | Migrated to `/stable/` base URL |
-| Tavily source shows raw URL | `_domain_from_url()` via `urlparse` |
-| Market cap unreadable integer | `_fmt_large()` → `$4.50T` / `$456B` |
-| Verbose RFC 2822 published dates | `_fmt_pub_date()` → `"28 May 2026"` |
-| `search_docs` hardcoded `form_type="8-K"` | `form_type=None` — searches all filing types |
-| `get_event_loop()` deprecated | `get_running_loop()` in all async contexts |
-| Agent exhausts rounds → empty reply | Forced final call with `tool_choice={"type": "none"}` |
-| Haiku pre-extraction latency (~1s/req) | Skip Haiku entirely in agent path |
-| Response too long / report-style | Explicit 3–5 sentence rule in system prompt for casual questions |
-| No multi-turn memory | `history` field on `ChatRequest`; prepended to agent messages |
-| Hard ticker gate broke general queries | Removed gate; agent handles `ticker=None` |
-| Qdrant version mismatch warning | `check_compatibility=False` |
+| Disclaimer text mismatch in schema | `InvestorResponse.disclaimer` matches system prompt exactly |
+| EPS test regex matched years/noise | Tightened to `\$?\d+\.\d{1,4}` (decimal required) |
+| `has_disclaimer` matched bare "research" | Required `"not investment advice"` or equivalent |
+| Filing dict uses `"form"` not `"form_type"` | `extract_citations` uses `.get("form_type") or .get("form","8-K")` |
+| `run_agent` returns bare string | Changed to `tuple[str, list[Citation]]`; all callers updated |
+| `data["reply"]` broken after Phase 6 | Renamed to `data["answer"]` in all tests and `_ask()` helper |
+| Streaming bubble not seeded immediately | Append empty streaming message before `fetch` call |
 
 ---
 
-## Next — Phase 5: Golden Q&A tests + investor response schema
+## Next — Phase 7: Earnings dashboard
 
-Validate answer quality against the golden question set and introduce a structured response format.
+Dedicated `/dashboard` page showing EPS surprises, upcoming earnings calendar, and key metrics.
 
-**Step 1 — `app/agent/schema.py`**
-```python
-class Citation(BaseModel):
-    accession_number: str
-    date: str
-    form_type: str
-    excerpt: str | None = None
-    source_url: str = ""
-
-class KeyNumber(BaseModel):
-    label: str       # e.g. "Q4 2025 EPS"
-    value: str       # e.g. "$1.29"
-    vs_estimate: str | None = None  # e.g. "+5.9%"
-
-class InvestorResponse(BaseModel):
-    answer: str
-    key_numbers: list[KeyNumber] = []
-    citations: list[Citation] = []
-    sentiment: str | None = None
-    disclaimer: str = "This is for research only, not investment advice."
+**New API routes (`apps/api/app/routes/market.py`):**
+```
+GET /market/quote/{ticker}    → price, change%, marketCap, pe, yearHigh, yearLow
+GET /market/earnings/{ticker} → list[{date, eps, epsEstimated, surprisePct}]
+GET /market/calendar          → 7-day upcoming earnings [{symbol, date, epsEstimated, time}]
+GET /market/metrics/{ticker}  → peRatioTTM, pbRatioTTM, roeTTM, debtToEquityTTM
 ```
 
-**Step 2 — `tests/test_golden_qa.py`** (skipped without `ANTHROPIC_API_KEY`)
+**New frontend files:**
+- `apps/web/src/app/dashboard/page.tsx` — Next.js App Router page at `/dashboard`
+- `apps/web/src/components/EarningsSurpriseChart.tsx` — bar chart (actual vs estimate, surprise %)
+- `apps/web/src/components/EarningsCalendar.tsx` — 7-day upcoming earnings list
+- `apps/web/src/components/MetricsGrid.tsx` — PE, PB, ROE, D/E grid
 
-| Question | Must contain | Must NOT contain |
-|----------|-------------|-----------------|
-| "Did Apple file a material 8-K in the last 90 days?" | citation with `form_type="8-K"`, date in answer | vague "I don't know" |
-| "What were NVDA's last 4 quarters EPS vs estimates?" | 4 EPS numbers, surprise % | empty answer |
-| "What is Google's current stock price?" | price value | "unavailable" without fallback |
-| "Should I buy Apple stock?" | disclaimer | direct buy/sell recommendation |
-
-**What NOT to do yet:**
-- Citations panel UI (Phase 6)
-- SSE streaming in frontend (Phase 6)
-- Earnings dashboard (Phase 7)
-
----
-
-## After Phase 4 — Phase 5: Golden Q&A tests
-
-Validate answer quality against the golden question set:
-- "Did Apple invest in anything recently that could impact my portfolio?"
-- "Google last 4 quarters: plan vs actual results?"
-- "Nvidia recent 8-Ks — any material events I should know about?"
-- "Should I buy Apple stock?" → must include disclaimer, no recommendation
+**Also add:** "Dashboard" link in chat header pointing to `/dashboard`.
+**Confirm chart library choice** (recharts vs native SVG) before adding npm dependency.
 
 ---
 

@@ -112,13 +112,14 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 
 ### Chat route (apps/api/app/routes/chat.py)
 
-- **Phase 3 (agent active):** `_resolve_ticker` returns only the UI hint (or None) — no Haiku call. Claude identifies tickers itself via tool calls.
+- **Phase 3+ (agent active):** `_resolve_ticker` returns only the UI hint (or None) — no Haiku call. Claude identifies tickers itself via tool calls.
 - **Phase 2 fallback:** `_resolve_ticker` uses Haiku extraction → hint → None. Only reached when `ANTHROPIC_API_KEY` is unset.
 - Agent path: no hard ticker gate — agent handles ticker=None gracefully (e.g. general finance questions)
 - `ChatRequest` includes `history: list[HistoryMessage]` for multi-turn context passed to `run_agent`
+- `run_agent` returns `tuple[str, list[Citation]]` — unpack as `reply, citations = await run_agent(...)`
+- `POST /chat` returns `InvestorResponse` (answer, citations, key_numbers, sentiment, disclaimer)
+- `POST /chat/stream` word-by-word streams text chunks then sends `{"citations": [...]}` event before `[DONE]`
 - CPU-bound embedding must use `asyncio.get_running_loop().run_in_executor()` — never `get_event_loop()` (deprecated in 3.10+)
-- Call `store.ensure_collection()` before search — first-run safe
-- Date filter guard: `f.get("date") and f["date"] >= cutoff` (None-safe ISO string sort)
 - All external calls (MCP, Qdrant, Claude) wrapped in `try/except` for graceful degradation
 - Phase 2+: use `asyncio.gather(*all_coros, return_exceptions=True)` — all sources concurrent
 
@@ -142,7 +143,9 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 - Dropdown defaults to `value=""` (Auto-detect) — never a ticker — so agent identifies ticker via tools
 - `history` is captured from `messages` state **before** the new user message is appended, then sent with every POST
 - `MessageContent` renders `**bold**` and `\n` inline — no react-markdown or other deps
-- Error display: show `err.detail` from API when available, not generic "Failed to fetch"
+- SSE stream: consume `/chat/stream` with `res.body.getReader()`; split on `"\n\n"`; handle `{"text"}`, `{"citations"}`, `[DONE]` events
+- Streaming bubble: append empty `{ role: "assistant", content: "", streaming: true }` immediately; append text chunks to it; set citations when the citations event arrives
+- `CitationsPanel` / `SourceCard` in `apps/web/src/components/` — no new npm deps
 
 ---
 
@@ -197,6 +200,10 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | No multi-turn memory | Every request starts fresh; agent repeats already-known context | `history: list[HistoryMessage]` field on `ChatRequest`; prepended to messages |
 | Hard ticker gate blocked general questions | `"could not identify ticker"` error for non-ticker queries | Removed gate in agent path; agent responds to any message |
 | Qdrant client version warning | `check_compatibility` warning on every startup | `QdrantClient(url=url, check_compatibility=False)` |
+| `run_agent` returns bare string | No structured citations returned to caller | Change return to `tuple[str, list[Citation]]`; update all callers |
+| `data["reply"]` in tests after Phase 6 | `KeyError` — field renamed to `answer` | `InvestorResponse.answer` — update test assertions and `_ask()` helper |
+| Filing dict uses `"form"` not `"form_type"` | `extract_citations` misses form type on `search_sec_filings` results | Use `f.get("form_type") or f.get("form", "8-K")` |
+| Streaming bubble not seeded immediately | Input disabled but no bubble appears until first chunk | Append `{role:"assistant",content:"",streaming:true}` before `fetch` call |
 
 ### Infrastructure
 
@@ -219,14 +226,14 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | **1** | SEC EDGAR MCP + RAG ingest + Qdrant + chat route | Done |
 | **2** | FMP MCP + Tavily + Alpha Vantage + parallel gather in chat | Done |
 | **3** | Claude agent loop (tool_use, conversational, multi-turn, streaming SSE) | Done |
-| **4** | Frontend: multi-turn history + markdown rendering in Next.js chat shell | **Done** |
-| **5** | Golden Q&A tests + investor response schema | **Next** |
-| **6** | Chat UI citations panel + SSE streaming | Pending |
-| **7** | Earnings dashboard (surprises, guidance trends) | Pending |
+| **4** | Frontend: multi-turn history + markdown rendering in Next.js chat shell | Done |
+| **5** | Golden Q&A tests + investor response schema | Done |
+| **6** | Chat UI citations panel + SSE streaming | **Done** |
+| **7** | Earnings dashboard (surprises, guidance trends) | **Next** |
 
 ### Phase 3 — complete
 
-All steps committed to `main`. 54 tests passing.
+All steps committed to `main`.
 
 | Step | Files | Notes |
 |------|-------|-------|
@@ -244,224 +251,30 @@ All steps committed to `main`. 54 tests passing.
 - `history` captured before each submit and sent with every `POST /chat`
 - `MessageContent` renders `**bold**` and `\n` — no new npm deps
 - Animated bouncing dots loading indicator
-- Updated welcome message and placeholder text
-3. Run a live `/chat` request after restarting FastAPI and confirm whether the tightened news filter is actually loaded.
-4. If generic Tavily results still appear, log the raw Tavily normalized results and filter decisions for one query.
-5. Consider changing Tavily search query from broad `Apple AAPL earnings stock recent news` to stricter quoted terms or using provider filters if supported.
-6. Phase 3 Claude synthesis is still needed; Phase 2 formatter is intentionally basic and will not produce high-quality investor prose.
+
+### Phase 5 — complete
+
+`apps/api/app/agent/schema.py` + `apps/api/tests/test_golden_qa.py` — two files, one commit.
+
+- `Citation`, `KeyNumber`, `InvestorResponse` Pydantic models
+- 4 golden Q&A tests (skipped without `ANTHROPIC_API_KEY`); all pass when key is set
+- Disclaimer text: `"This is for research and education only. Not investment advice."`
+
+### Phase 6 — complete
+
+All steps committed to `main`. 58 tests passing.
+
+| Step | Files | Notes |
+|------|-------|-------|
+| Step 1 | `agent/tools.py`, `agent/loop.py`, `routes/chat.py` | `extract_citations()`, `run_agent` → `tuple[str, list[Citation]]`, `/chat` returns `InvestorResponse`, `/chat/stream` word-by-word + citations event |
+| Step 2 | `ChatShell.tsx`, `CitationsPanel.tsx`, `SourceCard.tsx` | SSE reader, streaming bubble, collapsible citations panel |
+| Step 3 | `test_agent_loop.py`, `test_chat.py`, `test_golden_qa.py` | Updated for tuple return type and `InvestorResponse` shape |
 
 ---
 
 ## Remaining phases — full specifications
 
-### Phase 3: Claude agent loop (tool_use + streaming SSE)
-
-**Goal:** Replace the Phase 1/2 string-formatted reply with a real Claude synthesis that reads all gathered data, reasons over it, and writes investor-grade prose with citations.
-
-#### Files to create / modify
-
-| File | Change |
-|------|--------|
-| `apps/api/app/agent/__init__.py` | Empty package marker |
-| `apps/api/app/agent/loop.py` | Agent orchestration — tool_use loop |
-| `apps/api/app/agent/tools.py` | Tool definitions (Anthropic schema + executor functions) |
-| `apps/api/app/agent/prompts.py` | System prompt (investor tone + disclaimer instruction) |
-| `apps/api/app/routes/chat.py` | Add streaming endpoint `POST /chat/stream` (SSE) |
-
-#### Agent loop design (`loop.py`)
-
-```python
-# Pattern: while stop_reason == "tool_use", execute tools concurrently and re-call Claude
-async def run_agent(message, ticker, settings) -> AsyncIterator[str]:
-    messages = [{"role": "user", "content": message}]
-    while True:
-        response = await client.messages.create(
-            model=settings.claude_model,  # "claude-sonnet-4-6"
-            system=SYSTEM_PROMPT,
-            tools=TOOL_DEFINITIONS,
-            messages=messages,
-        )
-        if response.stop_reason == "tool_use":
-            # Execute all tool_use blocks concurrently
-            tool_results = await asyncio.gather(*[execute_tool(b) for b in response.content if b.type == "tool_use"])
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
-        else:
-            # Extract text and stream it
-            for block in response.content:
-                if block.type == "text":
-                    yield block.text
-            break
-```
-
-#### Tools to expose to Claude (7 tools)
-
-| Tool name | Calls | Returns |
-|-----------|-------|---------|
-| `search_sec_filings` | `mcp_client.recent_filings(ticker, form_type, limit)` | List of filing metadata |
-| `get_filing_content` | `mcp_client.filing_content(accession_number)` | Full filing text (truncated to 8k chars) |
-| `get_stock_quote` | `market_client.get_quote(ticker)` | Price, PE, market cap, change% |
-| `get_earnings_history` | `market_client.get_earnings_history(ticker)` | Last N quarters EPS vs estimate |
-| `search_news` | `news.search_news(query, tavily_key)` | Recent headlines + snippets |
-| `get_news_sentiment` | `news.get_news_sentiment(ticker, av_key)` | Bullish/Bearish/Neutral + score |
-| `search_docs` | `VectorStore.search(embed(query), ticker=ticker)` | Top-k RAG chunks from Qdrant |
-
-Each tool executor returns a dict (serialized to JSON string for Claude's tool result).
-
-#### System prompt (`prompts.py`)
-
-Key instructions:
-- Respond as a research assistant, never a financial advisor
-- Always include numbers (EPS, price, PE, market cap) when available — never vague
-- Cite source type + date for every factual claim (e.g., "per 8-K filed 2026-05-20")
-- Prefer filing tables > press releases > quote API when numbers conflict
-- End every response with the standard disclaimer: "This is for research and education only. Not investment advice."
-- If data is missing, say so explicitly rather than guessing
-
-#### Config additions (`config.py`)
-
-```python
-claude_model: str = "claude-sonnet-4-6"
-claude_max_tokens: int = 2048
-claude_max_tool_rounds: int = 5  # prevent runaway loops
-```
-
-#### Streaming endpoint (`chat.py`)
-
-```python
-@router.post("/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    async def event_generator():
-        async for chunk in run_agent(request.message, request.ticker, settings):
-            yield f"data: {json.dumps({'text': chunk})}\n\n"
-        yield "data: [DONE]\n\n"
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-```
-
----
-
-### Phase 4: Golden Q&A tests + investor response schema
-
-**Goal:** Structured output format + automated evaluation of answer quality against known-good questions.
-
-#### Files to create
-
-| File | Role |
-|------|------|
-| `apps/api/app/agent/schema.py` | `InvestorResponse` Pydantic model |
-| `apps/api/tests/test_golden_qa.py` | Golden question evaluation tests |
-
-#### Investor response schema (`schema.py`)
-
-```python
-class Citation(BaseModel):
-    accession_number: str
-    date: str
-    form_type: str
-    excerpt: str | None = None
-    source_url: str = ""
-
-class KeyNumber(BaseModel):
-    label: str          # e.g. "Q4 2025 EPS"
-    value: str          # e.g. "$1.29"
-    vs_estimate: str | None = None  # e.g. "+5.9%"
-
-class InvestorResponse(BaseModel):
-    answer: str
-    key_numbers: list[KeyNumber] = []
-    citations: list[Citation] = []
-    sentiment: str | None = None   # "Bullish" | "Bearish" | "Neutral"
-    disclaimer: str = "This is for research and education only. Not investment advice."
-```
-
-The non-streaming `POST /chat` endpoint should return `InvestorResponse` (not raw string) from Phase 4 onward.
-
-#### Golden questions and pass criteria (`test_golden_qa.py`)
-
-```
-pytestmark = pytest.mark.skipif(not settings.anthropic_api_key, reason="needs ANTHROPIC_API_KEY")
-```
-
-| Question | Must contain | Must NOT contain |
-|----------|-------------|-----------------|
-| "Did Apple file a material 8-K in the last 90 days?" | at least 1 citation with form_type="8-K", a date in answer | vague "I don't know" |
-| "What were NVDA's last 4 quarters EPS vs estimates?" | 4 key_numbers, surprise % in each | empty key_numbers |
-| "What is Google's current stock price and PE ratio?" | price value in answer, PE value in answer | "unavailable" without fallback |
-| "Should I buy Apple stock?" | disclaimer present | direct buy/sell recommendation |
-
----
-
-### Phase 5: Chat UI citations panel + SSE streaming
-
-**Goal:** Frontend receives streamed text and renders a collapsible citations panel with source cards.
-
-#### Files to create / modify
-
-| File | Change |
-|------|--------|
-| `apps/web/src/components/ChatShell.tsx` | Switch from `fetch` to SSE stream reader; render partial text as it arrives |
-| `apps/web/src/components/CitationsPanel.tsx` | New — collapsible panel of source cards |
-| `apps/web/src/components/SourceCard.tsx` | New — single filing card with form badge, date, EDGAR link |
-
-#### SSE consumption pattern (ChatShell.tsx)
-
-```typescript
-const res = await fetch(`${API_URL}/chat/stream`, { method: "POST", ... });
-const reader = res.body!.getReader();
-const decoder = new TextDecoder();
-let buffer = "";
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  buffer += decoder.decode(value, { stream: true });
-  const lines = buffer.split("\n\n");
-  buffer = lines.pop() ?? "";
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const raw = line.slice(6);
-      if (raw === "[DONE]") { setLoading(false); break; }
-      const { text } = JSON.parse(raw);
-      setMessages(m => {
-        const last = m[m.length - 1];
-        if (last?.role === "assistant" && last.streaming) {
-          return [...m.slice(0, -1), { ...last, content: last.content + text }];
-        }
-        return [...m, { role: "assistant", content: text, streaming: true }];
-      });
-    }
-  }
-}
-```
-
-#### CitationsPanel design
-
-- Collapsed by default: "Show N sources" button under each assistant message
-- Expanded: list of `SourceCard` components
-- `SourceCard`: form-type badge (color-coded: 8-K=red, 10-Q=blue, 10-K=green), ticker, date, excerpt (first 150 chars), link to EDGAR URL
-- EDGAR URL pattern: `https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{accession_clean}-index.htm`
-
-#### Message type update (TypeScript)
-
-```typescript
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-  streaming?: boolean;
-  citations?: Citation[];
-};
-
-type Citation = {
-  accession_number: string;
-  date: string;
-  form_type: string;
-  excerpt?: string;
-  source_url?: string;
-};
-```
-
----
-
-### Phase 6: Earnings dashboard
+### Phase 7: Earnings dashboard
 
 **Goal:** Dedicated dashboard page showing EPS surprises, upcoming earnings calendar, and key metrics for watchlist tickers.
 
