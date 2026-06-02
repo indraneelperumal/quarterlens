@@ -120,6 +120,8 @@ def test_chat_includes_phase2_market_and_news_sections(monkeypatch) -> None:
     monkeypatch.setattr(chat_route.settings, "fmp_api_key", "fmp-test")
     monkeypatch.setattr(chat_route.settings, "tavily_api_key", "tvly-test")
     monkeypatch.setattr(chat_route.settings, "alpha_vantage_api_key", "alpha-test")
+    # Force Phase 2 fallback formatter (agent loop requires real ANTHROPIC_API_KEY)
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "")
 
     response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
 
@@ -160,6 +162,7 @@ def test_chat_degrades_when_sources_fail(monkeypatch) -> None:
     monkeypatch.setattr(chat_route.settings, "fmp_api_key", "")
     monkeypatch.setattr(chat_route.settings, "tavily_api_key", "")
     monkeypatch.setattr(chat_route.settings, "alpha_vantage_api_key", "")
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "")
 
     response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
 
@@ -201,6 +204,7 @@ def test_chat_shows_market_error_when_key_is_configured(monkeypatch) -> None:
     monkeypatch.setattr(chat_route.settings, "fmp_api_key", "fmp-test")
     monkeypatch.setattr(chat_route.settings, "tavily_api_key", "")
     monkeypatch.setattr(chat_route.settings, "alpha_vantage_api_key", "")
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "")
 
     response = client.post("/chat", json={"message": "How is Apple doing?", "ticker": "AAPL"})
 
@@ -327,6 +331,7 @@ def test_chat_handles_partial_filing_payloads(monkeypatch) -> None:
     monkeypatch.setattr(chat_route.settings, "fmp_api_key", "")
     monkeypatch.setattr(chat_route.settings, "tavily_api_key", "")
     monkeypatch.setattr(chat_route.settings, "alpha_vantage_api_key", "")
+    monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "")
 
     response = client.post("/chat", json={"message": "Did Apple file?", "ticker": "AAPL"})
 

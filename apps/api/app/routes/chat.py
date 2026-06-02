@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -9,8 +10,10 @@ from functools import partial
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.agent.loop import run_agent
 from app.config import settings
 from app.mcp import client as mcp_client
 from app.mcp import market_client, news
@@ -274,7 +277,7 @@ def _build_sources(filings: list[dict], chunks: list[dict], news_items: list[dic
 
 @router.post("", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    """Phase 2: filings + RAG + market data + news. Claude synthesis is Phase 3."""
+    """Phase 3: Claude agent loop synthesis with Phase 2 formatter as fallback."""
 
     # ── 1. Ticker resolution ────────────────────────────────────────────────
     ticker = await _resolve_ticker(request.message, request.ticker)
@@ -287,7 +290,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
             sources=[],
         )
 
-    # ── 2. Gather all Phase 2 sources concurrently ─────────────────────────
+    # ── 2. Phase 3: Claude agent synthesis (when ANTHROPIC_API_KEY is set) ──
+    if settings.anthropic_api_key:
+        try:
+            reply = await run_agent(request.message, ticker, settings)
+            return ChatResponse(reply=reply, sources=[])
+        except Exception as exc:
+            log.warning("Agent loop failed, falling back to Phase 2 formatter: %s", exc)
+
+    # ── 3. Phase 2 fallback: gather all sources concurrently ────────────────
     filings_result, chunks_result, market_data, news_data = await asyncio.gather(
         _recent_filings(ticker),
         _search_filing_chunks(request.message, ticker),
@@ -323,7 +334,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     news_items = news_data.get("news", [])
     sentiment = news_data.get("sentiment", {"ticker": ticker, "articles": [], "count": 0})
 
-    # ── 3. Format reply ─────────────────────────────────────────────────────
+    # ── 4. Phase 2 format reply ─────────────────────────────────────────────
     lines: list[str] = []
 
     if filings:
@@ -414,3 +425,24 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     sources = _build_sources(filings, chunks, news_items)
     return ChatResponse(reply="\n".join(lines), sources=sources)
+
+
+@router.post("/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """SSE endpoint: yields the agent reply as a single data chunk then [DONE]."""
+
+    async def event_generator():
+        ticker = await _resolve_ticker(request.message, request.ticker)
+        if not ticker:
+            yield f"data: {json.dumps({'text': 'Could not identify a ticker.'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        try:
+            reply = await run_agent(request.message, ticker, settings)
+        except Exception as exc:
+            log.warning("Agent loop error in /stream: %s", exc)
+            reply = f"Error: {exc}"
+        yield f"data: {json.dumps({'text': reply})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
