@@ -67,7 +67,7 @@ class VectorStore:
     def search(
         self,
         vector: list[float],
-        limit: int = 8,
+        limit: int = 20,
         ticker: str | None = None,
         form_type: str | None = None,
     ) -> list[dict[str, Any]]:

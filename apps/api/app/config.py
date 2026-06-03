@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     sec_edgar_user_agent: str = "EarningsAgent contact@example.com"
 
     claude_model: str = "claude-sonnet-4-6"
-    claude_max_tokens: int = 4096
-    claude_max_tool_rounds: int = 5
+    claude_max_tokens: int = 1024   # most answers are 150–400 tokens; 1024 covers detail questions
+    claude_max_tool_rounds: int = 3  # 1 tool round + synthesis is typical; 3 covers complex queries
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "financial_docs"

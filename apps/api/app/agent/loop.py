@@ -1,7 +1,19 @@
-"""Claude tool_use agent loop for financial research synthesis."""
+"""Claude tool_use agent loop for financial research synthesis.
+
+Token optimisations applied here:
+  - Prompt caching: system prompt and tool definitions are marked with
+    cache_control=ephemeral so Anthropic reuses the cached KV state on
+    repeat calls within the 5-minute TTL window (charged at ~10% of normal).
+  - Reduced max_tokens (config): caps output length to prevent Claude from
+    producing report-length responses when a paragraph will do.
+  - Reduced max_tool_rounds (config): limits runaway multi-step investigation.
+  - History passed in is text-only (chat.py strips tool payloads before
+    sending to the frontend, so history never contains raw tool results).
+"""
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from typing import Any
 
@@ -12,6 +24,19 @@ from app.agent.schema import Citation
 from app.agent.tools import TOOL_DEFINITIONS, execute_tool, extract_citations, safe_json
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level cached prompt blocks — built once, reused on every API call.
+# Anthropic caches everything up to and including the cache_control marker.
+# Placing it on the system prompt saves ~700 tokens × N rounds per request.
+# Placing it on the last tool definition saves ~500 tokens × N rounds.
+# ---------------------------------------------------------------------------
+_SYSTEM_BLOCK: list[dict[str, Any]] = [
+    {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+]
+
+_CACHED_TOOLS: list[dict[str, Any]] = copy.deepcopy(TOOL_DEFINITIONS)
+_CACHED_TOOLS[-1] = {**_CACHED_TOOLS[-1], "cache_control": {"type": "ephemeral"}}
 
 
 async def run_agent(
@@ -39,8 +64,8 @@ async def run_agent(
         response = await ac.messages.create(
             model=settings.claude_model,
             max_tokens=settings.claude_max_tokens,
-            system=SYSTEM_PROMPT,
-            tools=TOOL_DEFINITIONS,
+            system=_SYSTEM_BLOCK,
+            tools=_CACHED_TOOLS,
             messages=messages,
         )
 
@@ -82,8 +107,8 @@ async def run_agent(
         response = await ac.messages.create(
             model=settings.claude_model,
             max_tokens=settings.claude_max_tokens,
-            system=SYSTEM_PROMPT,
-            tools=TOOL_DEFINITIONS,
+            system=_SYSTEM_BLOCK,
+            tools=_CACHED_TOOLS,
             tool_choice={"type": "none"},
             messages=messages,
         )

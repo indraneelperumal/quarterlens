@@ -1,4 +1,16 @@
-"""Anthropic tool definitions and async executors for the agent loop."""
+"""Anthropic tool definitions and async executors for the agent loop.
+
+Tool call cost order (cheapest → most expensive):
+  1. search_docs          — local Qdrant vector DB, no network, no API cost
+  2. get_stock_quote      — single FMP API call
+  3. get_earnings_history — single FMP API call
+  4. get_news_sentiment   — single Alpha Vantage call
+  5. search_news          — Tavily search API call
+  6. search_sec_filings   — live EDGAR network call (metadata only)
+  7. get_filing_content   — live EDGAR full-text fetch (most expensive)
+
+The tool descriptions below encode this priority so the model routes correctly.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -9,47 +21,36 @@ from typing import Any
 from app.agent.schema import Citation
 from app.mcp import client as mcp_client
 from app.mcp import market_client, news
-from app.rag.embedder import embed_texts
+from app.rag.embedder import embed_texts, rerank
 from app.rag.store import VectorStore
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
-        "name": "search_sec_filings",
+        "name": "search_docs",
         "description": (
-            "Search SEC EDGAR for recent filings for a stock ticker. "
-            "Returns a list of filing metadata (accession number, date, description)."
+            "ALWAYS call this first for any question about SEC filings, earnings disclosures, "
+            "management commentary, risk factors, or historical financial statements. "
+            "Searches a local vector database of already-ingested 10-K, 10-Q, and 8-K chunks — "
+            "instant, no API cost, no network call. "
+            "Only fall back to search_sec_filings if this returns no relevant results "
+            "OR the user explicitly asks for the most recent filing from the last 30 days."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "ticker": {"type": "string", "description": "Stock ticker, e.g. 'AAPL'"},
-                "form_type": {"type": "string", "description": "SEC form type, e.g. '8-K', '10-Q'", "default": "8-K"},
-                "limit": {"type": "integer", "description": "Max results to return (1-10)", "default": 5},
+                "query": {"type": "string", "description": "Natural-language question or topic, e.g. 'Apple Q2 2026 revenue guidance'"},
+                "ticker": {"type": "string", "description": "Limit results to this ticker (optional but recommended when known)"},
             },
-            "required": ["ticker"],
-        },
-    },
-    {
-        "name": "get_filing_content",
-        "description": (
-            "Fetch the full text of a specific SEC filing by accession number. "
-            "Returns cleaned plain text of the filing, truncated to max_chars."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticker": {"type": "string", "description": "Stock ticker, e.g. 'AAPL'"},
-                "accession_number": {"type": "string", "description": "SEC accession number, e.g. '0000320193-26-000052'"},
-                "max_chars": {"type": "integer", "description": "Max characters to return", "default": 8000},
-            },
-            "required": ["ticker", "accession_number"],
+            "required": ["query"],
         },
     },
     {
         "name": "get_stock_quote",
         "description": (
-            "Get the current stock quote for a ticker: price, daily change, "
-            "market cap, 52-week range."
+            "Get the live stock quote for a ticker: current price, daily change %, "
+            "market cap, 52-week high/low. "
+            "Use for: 'what is X trading at', 'stock price', 'market cap'. "
+            "Do NOT use for historical prices or EPS data."
         ),
         "input_schema": {
             "type": "object",
@@ -62,14 +63,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "get_earnings_history",
         "description": (
-            "Return historical EPS actuals vs estimates for a stock, including "
-            "surprise percentage for each quarter."
+            "Return historical EPS actuals vs estimates and surprise % for the last N quarters. "
+            "Use for: 'EPS history', 'earnings beats/misses', 'did X beat estimates'. "
+            "Do NOT use search_docs for EPS numbers — this endpoint is more accurate."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Stock ticker, e.g. 'AAPL'"},
-                "limit": {"type": "integer", "description": "Number of quarters to return (1-5)", "default": 4},
+                "limit": {"type": "integer", "description": "Number of quarters (1–5, default 4)", "default": 4},
             },
             "required": ["ticker"],
         },
@@ -77,13 +79,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "search_news",
         "description": (
-            "Search for recent financial news articles using a query string. "
-            "Returns titles, sources, snippets, and published dates."
+            "Search for recent news articles using a free-text query. "
+            "Use ONLY when the user asks about recent events, headlines, or news from the past few days "
+            "that would not be in SEC filings. "
+            "Do NOT use for historical filing content — use search_docs instead."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query, e.g. 'Apple earnings Q2 2026'"},
+                "query": {"type": "string", "description": "Search query, e.g. 'Apple AI partnership announcement June 2026'"},
             },
             "required": ["query"],
         },
@@ -91,8 +95,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "get_news_sentiment",
         "description": (
-            "Get news sentiment scores for a stock ticker from Alpha Vantage. "
-            "Returns bullish/bearish/neutral labels and scores for recent articles."
+            "Get bullish/bearish/neutral sentiment scores for a ticker from news articles. "
+            "Use ONLY when the user explicitly asks about market sentiment, "
+            "analyst mood, or overall perception — not for factual financial data."
         ),
         "input_schema": {
             "type": "object",
@@ -103,18 +108,42 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "search_docs",
+        "name": "search_sec_filings",
         "description": (
-            "Semantic search over ingested SEC filing chunks stored in the vector DB. "
-            "Returns the most relevant text passages for the query."
+            "Search LIVE SEC EDGAR for filing metadata (accession numbers, dates, descriptions). "
+            "Returns metadata ONLY — no filing content. "
+            "Use ONLY when: (1) search_docs returned no relevant results, "
+            "(2) the user needs a filing filed in the last 30 days not yet in the local DB, "
+            "or (3) the user explicitly asks 'what is the latest 8-K'. "
+            "Then call get_filing_content to read the actual text."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Natural-language question or topic to search for"},
-                "ticker": {"type": "string", "description": "Filter results to this ticker (optional)"},
+                "ticker": {"type": "string", "description": "Stock ticker, e.g. 'AAPL'"},
+                "form_type": {"type": "string", "description": "SEC form type: '8-K', '10-Q', '10-K'", "default": "8-K"},
+                "limit": {"type": "integer", "description": "Max results (1–10)", "default": 5},
             },
-            "required": ["query"],
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_filing_content",
+        "description": (
+            "Fetch full text of a specific SEC filing by accession number. "
+            "EXPENSIVE and slow — makes a live network call to EDGAR. "
+            "Use ONLY when you have an accession_number from search_sec_filings "
+            "AND search_docs did not already answer the question. "
+            "Prefer search_docs whenever possible."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker, e.g. 'AAPL'"},
+                "accession_number": {"type": "string", "description": "SEC accession number, e.g. '0000320193-26-000052'"},
+                "max_chars": {"type": "integer", "description": "Max characters to return (default 3000)", "default": 3000},
+            },
+            "required": ["ticker", "accession_number"],
         },
     },
 ]
@@ -164,8 +193,8 @@ def _qdrant_search(vector: list[float], ticker: str | None) -> list[dict]:
     from app.config import settings
     store = VectorStore(settings.qdrant_url)
     store.ensure_collection()
-    # No form_type filter: search_docs covers all ingested filing types
-    return store.search(vector, limit=5, ticker=ticker)
+    # Fetch 20 candidates; the cross-encoder reranker narrows these to top 5
+    return store.search(vector, limit=20, ticker=ticker)
 
 
 async def execute_tool(block: Any, ticker: str | None, settings: Any) -> Any:
@@ -215,9 +244,15 @@ async def execute_tool(block: Any, ticker: str | None, settings: Any) -> Any:
 
     if name == "search_docs":
         loop = asyncio.get_running_loop()
-        vec = await loop.run_in_executor(None, partial(embed_texts, [inp["query"]]))
-        return await loop.run_in_executor(
+        query = inp["query"]
+        vec = await loop.run_in_executor(None, partial(embed_texts, [query]))
+        docs = await loop.run_in_executor(
             None, partial(_qdrant_search, vec[0], inp.get("ticker") or ticker)
         )
+        # Re-rank: bi-encoder fetches 20 candidates, cross-encoder keeps top 5.
+        # Runs in executor to keep the async loop unblocked.
+        if len(docs) > 1:
+            docs = await loop.run_in_executor(None, partial(rerank, query, docs, 5))
+        return docs
 
     raise ValueError(f"Unknown tool: {name!r}")
