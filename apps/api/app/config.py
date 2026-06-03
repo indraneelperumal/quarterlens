@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""
     alpha_vantage_api_key: str = ""
     tavily_api_key: str = ""
-    sec_edgar_user_agent: str = "EarningsAgent contact@example.com"
+    sec_edgar_user_agent: str = "QuarterLens indraneelr83@outlook.com"
 
     claude_model: str = "claude-sonnet-4-6"
     claude_max_tokens: int = 1024   # most answers are 150–400 tokens; 1024 covers detail questions

@@ -24,7 +24,7 @@ from edgar_client import EdgarClient
 mcp = FastMCP("sec-edgar")
 
 _USER_AGENT = os.environ.get(
-    "SEC_EDGAR_USER_AGENT", "EarningsAgent contact@example.com"
+    "SEC_EDGAR_USER_AGENT", "QuarterLens indraneelr83@outlook.com"
 )
 _client = EdgarClient(_USER_AGENT)
 

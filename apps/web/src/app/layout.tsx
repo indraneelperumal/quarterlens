@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Earnings Intelligence",
+  title: "QuarterLens",
   description: "MCP-powered earnings intelligence for retail investors",
 };
 

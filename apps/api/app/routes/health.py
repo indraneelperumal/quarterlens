@@ -8,7 +8,7 @@ router = APIRouter(tags=["health"])
 @router.get("/")
 async def root() -> dict:
     return {
-        "service": "Earnings Intelligence API",
+        "service": "QuarterLens API",
         "version": "0.1.0",
         "endpoints": {
             "health": "GET /health",

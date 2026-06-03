@@ -5,7 +5,7 @@ from app.config import settings
 from app.routes import chat, health, market
 
 app = FastAPI(
-    title="Earnings Intelligence API",
+    title="QuarterLens API",
     description="MCP + RAG agent host for retail earnings intelligence",
     version="0.1.0",
 )
