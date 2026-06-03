@@ -189,12 +189,22 @@ def safe_json(result: Any) -> str:
     return json.dumps(result, default=str)
 
 
+_store: VectorStore | None = None
+
+
+def _get_store() -> VectorStore:
+    """Return the process-lifetime VectorStore singleton, creating it on first call."""
+    global _store
+    if _store is None:
+        from app.config import settings
+        _store = VectorStore(settings.qdrant_url, settings.qdrant_api_key)
+        _store.ensure_collection()
+    return _store
+
+
 def _qdrant_search(vector: list[float], ticker: str | None) -> list[dict]:
-    from app.config import settings
-    store = VectorStore(settings.qdrant_url, settings.qdrant_api_key)
-    store.ensure_collection()
     # Fetch 20 candidates; the cross-encoder reranker narrows these to top 5
-    return store.search(vector, limit=20, ticker=ticker)
+    return _get_store().search(vector, limit=20, ticker=ticker)
 
 
 async def execute_tool(block: Any, ticker: str | None, settings: Any) -> Any:

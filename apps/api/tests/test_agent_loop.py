@@ -17,6 +17,22 @@ client = TestClient(app)
 
 
 # ---------------------------------------------------------------------------
+# Fixtures — reset module-level singletons so each test gets fresh mocks
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_singletons():
+    """Reset the Anthropic client and VectorStore singletons between tests."""
+    agent_loop._ac = None
+    from app.agent import tools as agent_tools
+    agent_tools._store = None
+    yield
+    agent_loop._ac = None
+    agent_tools._store = None
+
+
+# ---------------------------------------------------------------------------
 # run_agent — unit tests (no real API calls)
 # ---------------------------------------------------------------------------
 
@@ -229,11 +245,12 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     async def fake_resolve_ticker(message: str, hint: str | None) -> str:
         return "NVDA"
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None):
-        return ("NVDA had strong earnings last quarter.", [])
+    async def fake_stream_agent(message, ticker, cfg, history=None):
+        yield "NVDA had strong earnings last quarter."
+        yield []  # citations
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
-    monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_route, "stream_agent", fake_stream_agent)
     monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "test-key")
 
     response = client.post(
@@ -250,7 +267,7 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
     data_lines = [
         line[6:] for line in body.splitlines() if line.startswith("data: ") and line != "data: [DONE]"
     ]
-    # Word-by-word: multiple text events + 1 citations event
+    # At least 1 text event + 1 citations event
     assert len(data_lines) >= 2
     text_events = [json.loads(d) for d in data_lines if "text" in json.loads(d)]
     citations_events = [json.loads(d) for d in data_lines if "citations" in json.loads(d)]
@@ -261,17 +278,18 @@ def test_chat_stream_endpoint_sse_format(monkeypatch):
 
 
 def test_chat_stream_no_ticker_still_calls_agent(monkeypatch):
-    """When ticker resolution fails, /stream still calls run_agent with ticker=None."""
+    """When ticker resolution fails, /stream still calls stream_agent with ticker=None."""
 
     async def fake_resolve_ticker(message: str, hint: str | None) -> None:
         return None
 
-    async def fake_run_agent(message: str, ticker, cfg, history=None):
+    async def fake_stream_agent(message, ticker, cfg, history=None):
         assert ticker is None
-        return ("I can help with general finance questions too.", [])
+        yield "I can help with general finance questions too."
+        yield []  # citations
 
     monkeypatch.setattr(chat_route, "_resolve_ticker", fake_resolve_ticker)
-    monkeypatch.setattr(chat_route, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_route, "stream_agent", fake_stream_agent)
     monkeypatch.setattr(chat_route.settings, "anthropic_api_key", "test-key")
 
     response = client.post("/chat/stream", json={"message": "What happened recently?"})

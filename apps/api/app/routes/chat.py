@@ -13,7 +13,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agent.loop import run_agent
+from app.agent.loop import run_agent, stream_agent
 from app.agent.schema import InvestorResponse
 from app.config import settings
 from app.mcp import client as mcp_client
@@ -443,24 +443,20 @@ async def chat(request: ChatRequest) -> InvestorResponse:
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """SSE endpoint: streams the agent reply word-by-word then sends citations."""
+    """SSE endpoint: streams agent reply tokens as Claude generates them, then citations."""
 
     async def event_generator():
         ticker = await _resolve_ticker(request.message, request.ticker)
         history = [{"role": m.role, "content": m.content} for m in request.history]
         try:
-            reply, citations = await run_agent(request.message, ticker, settings, history=history)
+            async for chunk in stream_agent(request.message, ticker, settings, history=history):
+                if isinstance(chunk, list):
+                    yield f"data: {json.dumps({'citations': [c.model_dump() for c in chunk]})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'text': chunk})}\n\n"
         except Exception as exc:
-            log.warning("Agent loop error in /stream: %s", exc)
-            reply, citations = f"Error: {exc}", []
-
-        words = reply.split(" ")
-        for i, word in enumerate(words):
-            chunk = word + (" " if i < len(words) - 1 else "")
-            yield f"data: {json.dumps({'text': chunk})}\n\n"
-            await asyncio.sleep(0.02)
-
-        yield f"data: {json.dumps({'citations': [c.model_dump() for c in citations]})}\n\n"
+            log.warning("Agent stream error: %s", exc)
+            yield f"data: {json.dumps({'text': f'Error: {exc}'})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
