@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     claude_max_tool_rounds: int = 3  # 1 tool round + synthesis is typical; 3 covers complex queries
 
     qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
     qdrant_collection: str = "financial_docs"
 
     api_host: str = "0.0.0.0"

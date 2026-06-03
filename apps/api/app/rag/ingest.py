@@ -83,9 +83,10 @@ async def ingest_tickers(
     tickers: list[str],
     qdrant_url: str,
     user_agent: str,
+    api_key: str = "",
 ) -> None:
     """Ensure the Qdrant collection exists, then ingest each ticker sequentially."""
-    store = VectorStore(qdrant_url)
+    store = VectorStore(qdrant_url, api_key)
     store.ensure_collection()
 
     for ticker in tickers:

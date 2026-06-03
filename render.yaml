@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: quarterlens-api
+    runtime: python
+    rootDir: apps/api
+    plan: free
+    buildCommand: >-
+      pip install torch --index-url https://download.pytorch.org/whl/cpu &&
+      pip install -e . &&
+      python -c "
+      from sentence_transformers import SentenceTransformer, CrossEncoder;
+      SentenceTransformer('all-MiniLM-L6-v2');
+      CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+      "
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FMP_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SEC_EDGAR_USER_AGENT
+        value: "QuarterLens indraneelr83@outlook.com"
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

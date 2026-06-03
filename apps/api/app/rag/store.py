@@ -25,9 +25,12 @@ DIM = 384
 
 
 class VectorStore:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, api_key: str = "") -> None:
         # check_compatibility=False suppresses the client/server minor-version warning
-        self._client = QdrantClient(url=url, check_compatibility=False)
+        kwargs: dict = {"check_compatibility": False}
+        if api_key:
+            kwargs["api_key"] = api_key
+        self._client = QdrantClient(url=url, **kwargs)
 
     def ensure_collection(self) -> None:
         existing = {c.name for c in self._client.get_collections().collections}

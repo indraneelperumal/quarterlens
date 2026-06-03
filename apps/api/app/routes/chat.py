@@ -118,7 +118,7 @@ async def _search_filing_chunks(message: str, ticker: str) -> tuple[list[dict], 
 
 
 def _qdrant_search(vector: list[float], ticker: str) -> list[dict]:
-    store = VectorStore(settings.qdrant_url)
+    store = VectorStore(settings.qdrant_url, settings.qdrant_api_key)
     store.ensure_collection()
     return store.search(vector, limit=5, ticker=ticker, form_type="8-K")
 
