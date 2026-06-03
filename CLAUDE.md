@@ -25,19 +25,20 @@ Comprehensive spec, workflow rules, and lessons learned for every Claude Code se
 ```
 ┌─────────────────────────────────────────────────┐
 │            Next.js Frontend (:3000)             │
-│   Chat interface  │  Earnings dashboard (P5+)  │
+│   Chat interface  │  Earnings dashboard (/P7)  │
 └──────────────────────────┬──────────────────────┘
-                           │ HTTP (JSON)
+                           │ HTTP / SSE
 ┌──────────────────────────▼──────────────────────┐
 │         Python FastAPI Backend (:8000)          │
-│  MCP Client (stdio)  │  RAG Pipeline (Qdrant)  │
-│  asyncio.gather — all sources concurrent        │
-│  Anthropic Claude (Phase 3+)                    │
+│  routes/chat.py  │  routes/market.py            │
+│  agent/loop.py (Claude Sonnet tool_use loop)    │
+│  MCP clients (stdio) │ RAG Pipeline (Qdrant)    │
+│  asyncio.gather — all tool calls concurrent     │
 └──────────┬──────────────────────────────────────┘
            │ MCP stdio
     ┌──────┴─────────────┐
     │  SEC EDGAR server  │   market-data server
-    │  (sec-edgar/)      │   (market-data/)
+    │  (sec-edgar/)      │   (market-data/) → FMP /stable
     └────────────────────┘
                   │
          Qdrant (:6333) — collection: financial_docs
@@ -145,7 +146,12 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 - `MessageContent` renders `**bold**` and `\n` inline — no react-markdown or other deps
 - SSE stream: consume `/chat/stream` with `res.body.getReader()`; split on `"\n\n"`; handle `{"text"}`, `{"citations"}`, `[DONE]` events
 - Streaming bubble: append empty `{ role: "assistant", content: "", streaming: true }` immediately; append text chunks to it; set citations when the citations event arrives
-- `CitationsPanel` / `SourceCard` in `apps/web/src/components/` — no new npm deps
+- `CitationsPanel` / `SourceCard` in `apps/web/src/components/` — no new npm deps for chat
+- Dashboard (`/dashboard`): `"use client"`, `useEffect` + `fetch` per section, separate loading state per card
+- `recharts` added in Phase 7 (`npm install recharts`) — do not remove; used by `EarningsSurpriseChart`
+- recharts `Tooltip.formatter` value type is `ValueType | undefined` — always guard with `typeof val === "number"` before calling `.toFixed()`
+- Dashboard ticker selector defaults to first watchlist item (no Auto-detect) — all sections refetch on ticker change
+- Calendar fetch is ticker-independent (global 7-day window) — lives in a separate `useEffect([], [])` that runs once
 
 ---
 
@@ -204,6 +210,9 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | `data["reply"]` in tests after Phase 6 | `KeyError` — field renamed to `answer` | `InvestorResponse.answer` — update test assertions and `_ask()` helper |
 | Filing dict uses `"form"` not `"form_type"` | `extract_citations` misses form type on `search_sec_filings` results | Use `f.get("form_type") or f.get("form", "8-K")` |
 | Streaming bubble not seeded immediately | Input disabled but no bubble appears until first chunk | Append `{role:"assistant",content:"",streaming:true}` before `fetch` call |
+| `earnings` route returned raw `None` from FMP | `None` passed back as JSON — not an empty list | Added `or []` guard: `return result or []` |
+| Calendar endpoint accepted arbitrary date strings | LLM could pass bad format → no validation before FMP call | `date.fromisoformat()` guard → `HTTPException(422)` |
+| recharts `Tooltip` formatter typed `val: number` | TypeScript error — value is `ValueType \| undefined` | `typeof val === "number"` guard before `.toFixed()` |
 
 ### Infrastructure
 
@@ -271,13 +280,54 @@ All steps committed to `main`. 58 tests passing.
 | Step 2 | `ChatShell.tsx`, `CitationsPanel.tsx`, `SourceCard.tsx` | SSE reader, streaming bubble, collapsible citations panel |
 | Step 3 | `test_agent_loop.py`, `test_chat.py`, `test_golden_qa.py` | Updated for tuple return type and `InvestorResponse` shape |
 
+### Phase 7 — complete
+
+All steps committed to `main`. 67 tests passing.
+
+| Step | Files | Notes |
+|------|-------|-------|
+| Step 1 | `routes/market.py`, `main.py`, `tests/test_market.py` | 4 `/market/*` endpoints; graceful no-key degradation; ISO date validation; 9 unit tests |
+| Step 2 | `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, `package.json` | recharts installed; EPS bar chart, 7-day calendar, 2×2 metrics grid |
+| Step 3 | `ChatShell.tsx` | "Dashboard →" nav link in chat header |
+
 ---
 
 ## Remaining phases — full specifications
 
 ### Phase 7: Earnings dashboard — **Complete**
 
-Delivered: `routes/market.py` (4 endpoints), `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, "Dashboard →" nav link. recharts used for bar chart. 67 tests passing.
+All steps committed to `main`. 67 tests passing.
+
+| Step | Files | Notes |
+|------|-------|-------|
+| Step 1 | `routes/market.py`, `main.py`, `tests/test_market.py` | 4 GET endpoints, graceful no-key degradation, ISO date validation, 9 unit tests |
+| Step 2 | `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, `package.json` | recharts bar chart, 7-day calendar list, 2×2 metrics grid |
+| Step 3 | `ChatShell.tsx` | "Dashboard →" link in header; "← Chat" on dashboard page |
+
+### Phase 8: Deployment (Render + Vercel) — **Next**
+
+Deploy FastAPI backend to Render and Next.js frontend to Vercel.
+
+**Blocked on:** Qdrant hosting decision — Render free tier has no persistent disk, so Qdrant must be external. Choose Qdrant Cloud (managed free tier) or self-hosted VPS before starting.
+
+#### Backend — Render
+
+1. Create `render.yaml` at monorepo root specifying `rootDir: apps/api`, build command `pip install -e ".[dev]"`, start command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+2. Add all env vars in Render dashboard (ANTHROPIC_API_KEY, FMP_API_KEY, ALPHA_VANTAGE_API_KEY, TAVILY_API_KEY, QDRANT_URL, SEC_EDGAR_USER_AGENT).
+3. Connect GitHub repo → Render auto-deploys on every push to `main`.
+
+#### Frontend — Vercel
+
+1. Import repo; set **Root Directory** to `apps/web`.
+2. Add `NEXT_PUBLIC_API_URL=https://<render-service>.onrender.com`.
+3. Deploy — Vercel auto-detects Next.js App Router, no extra config.
+
+#### Post-deploy checklist
+
+- `curl https://<render-service>.onrender.com/health` → 200
+- Chat UI streams a response end-to-end
+- Dashboard loads quote + EPS chart for AAPL
+- Ingest at least one ticker into remote Qdrant after deploy
 
 ---
 
@@ -309,9 +359,15 @@ cd apps/api && python -m pytest -q
 | URL | Method | Purpose |
 |-----|--------|---------|
 | `http://localhost:3000` | GET | Chat UI |
+| `http://localhost:3000/dashboard` | GET | Earnings dashboard |
 | `http://localhost:8000/health` | GET | Health + watchlist |
-| `http://localhost:8000/docs` | GET | Swagger |
-| `http://localhost:8000/chat` | POST | `{"message": "...", "ticker": "AAPL"}` |
+| `http://localhost:8000/docs` | GET | Swagger (all routes) |
+| `http://localhost:8000/chat` | POST | `{"message": "...", "ticker": null, "history": []}` → `InvestorResponse` |
+| `http://localhost:8000/chat/stream` | POST | Same body → SSE stream (word-by-word + citations event) |
+| `http://localhost:8000/market/quote/{ticker}` | GET | Live price, change%, market cap, 52-wk range |
+| `http://localhost:8000/market/earnings/{ticker}` | GET | Last N quarters EPS actuals vs estimates (`?limit=4`) |
+| `http://localhost:8000/market/calendar` | GET | 7-day upcoming earnings (`?from_date=&to_date=`) |
+| `http://localhost:8000/market/metrics/{ticker}` | GET | PE, PB, ROE, D/E (TTM) |
 | `http://localhost:6333` | GET | Qdrant dashboard |
 
 ---

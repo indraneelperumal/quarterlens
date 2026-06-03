@@ -15,17 +15,18 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ---
 
-## Planned architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
 │            Next.js Frontend (:3000)             │
-│   Chat interface  │  Earnings dashboard (P6+)  │
+│   Chat interface  │  Earnings dashboard (/P7)  │
 └──────────────────────────┬──────────────────────┘
                            │ HTTP / SSE
 ┌──────────────────────────▼──────────────────────┐
 │         Python FastAPI Backend (:8000)          │
 │  agent/loop.py (Claude Sonnet tool_use loop)    │
+│  routes/market.py  │  routes/chat.py            │
 │  MCP clients (stdio) │ RAG (Qdrant)             │
 │  asyncio.gather — all tool calls concurrent     │
 └──────────┬──────────────────────────────────────┘
@@ -113,51 +114,102 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ---
 
-## Bugs fixed (Phase 5 & 6)
+## Bugs fixed (all phases)
 
-| Bug | Fix |
-|-----|-----|
-| Disclaimer text mismatch in schema | `InvestorResponse.disclaimer` matches system prompt exactly |
-| EPS test regex matched years/noise | Tightened to `\$?\d+\.\d{1,4}` (decimal required) |
-| `has_disclaimer` matched bare "research" | Required `"not investment advice"` or equivalent |
-| Filing dict uses `"form"` not `"form_type"` | `extract_citations` uses `.get("form_type") or .get("form","8-K")` |
-| `run_agent` returns bare string | Changed to `tuple[str, list[Citation]]`; all callers updated |
-| `data["reply"]` broken after Phase 6 | Renamed to `data["answer"]` in all tests and `_ask()` helper |
-| Streaming bubble not seeded immediately | Append empty streaming message before `fetch` call |
+| Phase | Bug | Fix |
+|-------|-----|-----|
+| 1 | `parents[5]` in ingest.py | `parents[4]` is monorepo root |
+| 1 | Random UUID4 chunk IDs → duplicate Qdrant points | `uuid5(NAMESPACE_URL, f"{accession}#{i}")` |
+| 1 | `json.loads` on `"ERROR: ..."` string | Check `text.startswith("ERROR:")` before parsing |
+| 1 | Overlap ≥ chunk size → infinite chunker | `ValueError` guard at top of `chunk_text` |
+| 1 | `QdrantClient.search()` removed in 1.12+ | Use `query_points()`, access `result.points` |
+| 2 | FMP `/api/v3/` endpoints → 403 | Migrate to `/stable/` base URL |
+| 2 | FMP 200 `{"Error Message": "..."}` silent failures | Detect and raise `ValueError` in `_get` |
+| 2 | Semaphore in `__init__` binds to wrong event loop | Lazy init via `_get_sem()` |
+| 2 | FMP retry sleeps after last attempt | `if attempt < 3: await asyncio.sleep(...)` |
+| 2 | `debtToEquityTTM` mapped to wrong FMP field | `setdefault("debtToEquityTTM", None)` — shows "n/a" |
+| 2 | `eps` alias via `setdefault` uses wrong value | Unconditional `entry["eps"] = entry.get("epsActual")` |
+| 2 | Tavily source shows raw URL | `_domain_from_url()` via `urlparse` as fallback |
+| 2 | Market cap shown as 13-digit int | `_fmt_large()` → `$4.50T` / `$456B` / `$78M` |
+| 2 | RFC 2822 date in news items | `_fmt_pub_date()` trims to `"28 May 2026"` |
+| 3 | `asyncio.get_event_loop()` deprecated | `asyncio.get_running_loop()` inside `async def` |
+| 3 | Agent max rounds exhausted → empty reply | Forced `tool_choice={"type": "none"}` final call |
+| 3 | Haiku pre-extraction adds ~1s latency | Skip in agent path; agent identifies tickers via tools |
+| 3 | Report-style responses (tables, headers, emojis) | Explicit length rules in system prompt |
+| 3 | No multi-turn memory | `history: list[HistoryMessage]` on `ChatRequest` |
+| 3 | Hard ticker gate blocks general questions | Removed gate in agent path |
+| 4 | Dropdown default AAPL overrides message ticker | Default to `""` (Auto-detect) |
+| 5 | Disclaimer text mismatch in schema | `InvestorResponse.disclaimer` matches system prompt exactly |
+| 5 | EPS regex matched years/noise | Tightened to `\$?\d+\.\d{1,4}` (decimal required) |
+| 5 | `has_disclaimer` matched bare "research" | Required `"not investment advice"` or equivalent |
+| 6 | Filing dict uses `"form"` not `"form_type"` | `extract_citations` uses `.get("form_type") or .get("form","8-K")` |
+| 6 | `run_agent` returns bare string | Changed to `tuple[str, list[Citation]]`; all callers updated |
+| 6 | `data["reply"]` broken after Phase 6 | Renamed to `data["answer"]` in all tests and `_ask()` helper |
+| 6 | Streaming bubble not seeded immediately | Append `{role:"assistant",content:"",streaming:true}` before `fetch` |
+| 7 | `earnings` route returned raw `None` from FMP | Added `or []` guard |
+| 7 | Calendar accepted arbitrary date strings | `date.fromisoformat()` validation → `HTTPException(422)` |
+| 7 | recharts `Tooltip` formatter typed `val: number` | `typeof val === "number"` type guard |
 
 ---
 
 ## Next — Phase 8: Deployment (Render + Vercel)
 
-Deploy FastAPI backend to Render and Next.js frontend to Vercel.
+Deploy the full stack publicly. Qdrant must be external (Render free tier has no persistent disk).
 
-**Steps:**
-1. Add `render.yaml` at monorepo root for the FastAPI service
-2. Set env vars in Render dashboard (ANTHROPIC_API_KEY, FMP_API_KEY, etc.)
-3. Deploy to Vercel (auto-detects Next.js in `apps/web`); set `NEXT_PUBLIC_API_URL` to Render service URL
-4. Qdrant: either Qdrant Cloud (free tier) or self-hosted on a VPS; update `QDRANT_URL`
+### Decision needed first
 
-**Blocked on:** Qdrant hosting decision (Qdrant Cloud vs self-hosted). Render free tier has no persistent disk — Qdrant must be external.
+**Qdrant hosting:** choose one:
+- **Qdrant Cloud free tier** — managed, 1 GB, no ops overhead (recommended)
+- **Self-hosted VPS** — e.g. a $6/mo DigitalOcean droplet running `docker run qdrant/qdrant`
+
+Update `QDRANT_URL` in Render env vars once chosen.
+
+### Backend — Render
+
+1. Create `render.yaml` at monorepo root:
+
+```yaml
+services:
+  - type: web
+    name: earnings-api
+    runtime: python
+    rootDir: apps/api
+    buildCommand: pip install -e ".[dev]"
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FMP_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SEC_EDGAR_USER_AGENT
+        value: "EarningsAgent contact@example.com"
+      - key: QDRANT_URL
+        sync: false
+```
+
+2. Push to GitHub → connect repo in Render → auto-deploys on every `main` push.
+3. Note the service URL (e.g. `https://earnings-api.onrender.com`).
+
+### Frontend — Vercel
+
+1. Import repo in Vercel; set **Root Directory** to `apps/web`.
+2. Add env var: `NEXT_PUBLIC_API_URL=https://earnings-api.onrender.com`
+3. Deploy — Vercel auto-detects Next.js App Router; no extra config needed.
+
+### Post-deploy checklist
+
+- [ ] `curl https://earnings-api.onrender.com/health` → 200
+- [ ] Chat page (`/`) sends a message → answer streams back
+- [ ] Dashboard (`/dashboard`) loads quote + EPS chart for AAPL
+- [ ] Ingest at least one ticker into remote Qdrant after deploy
 
 ---
 
-## Bugs fixed (Phase 7)
-
-| Bug | Fix |
-|-----|-----|
-| `earnings` route returned raw `None` from FMP | Added `or []` guard: `return result or []` |
-| Calendar accepted arbitrary date strings | Added `date.fromisoformat()` validation → `HTTPException(422)` |
-| recharts `Tooltip` formatter typed `val: number` | Changed to `typeof val === "number"` type guard |
-
----
-
-## Archived — Phase 7 plan
-
-Done. See Key files table above.
-
----
-
-## Issues log
+## Infrastructure issues log
 
 | # | Issue | Symptom | Fix |
 |---|-------|---------|-----|
@@ -165,15 +217,8 @@ Done. See Key files table above.
 | 2 | Root `.env` not loaded | API keys ignored | Load from `parents[3]` (monorepo root) |
 | 3 | Qdrant healthcheck fails | No `curl` in official image | Bash TCP probe on `/readyz` |
 | 4 | `pytest` without `python -m` | `ModuleNotFoundError: No module named 'app'` | Run as `python -m pytest` from inside `apps/api/` |
-| 5 | FMP `/api/v3/` → 403 | All FMP calls fail | Migrate to `/stable/` endpoints |
-| 6 | Tavily raw URL in source | Full URL shown in chat | `_domain_from_url()` fallback |
-| 7 | Market cap unreadable | `4498884016360` in chat | `_fmt_large()` |
-| 8 | Agent empty reply on round exhaustion | Blank 200 response | Forced `tool_choice={"type": "none"}` |
-| 9 | Haiku ticker extraction latency | ~1s added before every agent call | Skip in agent path entirely |
-| 10 | Report-style responses | Tables, headers, emojis for simple questions | Length rules in system prompt |
-| 11 | No conversation memory | Agent repeats fetched data every turn | `history` field in `ChatRequest` |
-| 12 | `get_event_loop()` deprecated | Will raise in Python 3.12 | `get_running_loop()` everywhere |
-| 13 | Hard ticker gate | General questions return error | Removed for agent path |
+| 5 | `apps/web/.env.example` gitignored | Clean clone can't set `NEXT_PUBLIC_API_URL` | Narrow ignore to `.env.local` only |
+| 6 | Requires Python 3.12 | Fails on macOS 3.10 default | `requires-python = ">=3.10"` |
 
 ---
 
@@ -196,10 +241,17 @@ cd apps/api && python -m pytest -q
 # Ingest a ticker into Qdrant
 cd apps/api && python -c "import asyncio; from app.rag.ingest import ingest_ticker; asyncio.run(ingest_ticker('AAPL'))"
 
-# Smoke test
+# Smoke tests
+curl -s http://localhost:8000/health | python -m json.tool
+
 curl -s -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"message":"How is Apple performing?"}' | python -m json.tool
+
+curl -s http://localhost:8000/market/quote/AAPL | python -m json.tool
+curl -s http://localhost:8000/market/earnings/AAPL | python -m json.tool
+curl -s "http://localhost:8000/market/calendar" | python -m json.tool
+curl -s http://localhost:8000/market/metrics/AAPL | python -m json.tool
 ```
 
 ---
