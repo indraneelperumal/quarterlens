@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, Fragment, useState } from "react";
+import Link from "next/link";
 import { CitationsPanel } from "./CitationsPanel";
 
 const WATCHLIST = ["AAPL", "GOOGL", "MSFT", "NVDA", "AMZN", "JPM", "UNH", "XOM", "COST"];
@@ -145,6 +146,12 @@ export function ChatShell() {
         <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
           Earnings Intelligence
         </h1>
+        <Link
+          href="/dashboard"
+          className="text-sm text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+        >
+          Dashboard →
+        </Link>
         <label className="ml-auto flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
           Ticker
           <select
