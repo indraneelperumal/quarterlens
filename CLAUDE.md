@@ -99,10 +99,12 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 
 ### RAG pipeline
 
-- Chunk size: 1500 chars, overlap: 200 chars (guard: `if overlap >= chunk_size: raise ValueError`)
-- Embeddings: `normalize_embeddings=True` (cosine-compatible)
-- IDs: `uuid5(NAMESPACE_URL, f"{accession}#{chunk_index}")` — deterministic, idempotent re-ingestion
-- Qdrant upsert: use `query_points()` NOT `.search()` (removed in qdrant-client 1.12+)
+- Chunk size: 1500 chars, overlap: **300 chars** (increased from 200 for better cross-chunk continuity)
+- Chunker snaps to the nearest paragraph/sentence boundary before each hard cut via `_snap_to_boundary()` — prevents splitting mid-sentence. Lookback window: 250 chars.
+- Always `break` when `end >= len(text)` — do NOT use `max(step, 1)` advance or the loop will re-emit chunks 1 char at a time for short texts.
+- Embeddings: `normalize_embeddings=True` (cosine-compatible); bi-encoder model `all-MiniLM-L6-v2`, effective window ~256 tokens (~960 chars).
+- IDs: `uuid5(NAMESPACE_URL, f"{accession}#{chunk_index}")` — deterministic, idempotent re-ingestion.
+- Qdrant upsert: use `query_points()` NOT `.search()` (removed in qdrant-client 1.12+).
   ```python
   result = self._client.query_points(
       collection_name=COLLECTION, query=vector, limit=limit,
@@ -110,6 +112,17 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
   )
   return [{**(hit.payload or {}), "score": hit.score} for hit in result.points]
   ```
+- **Two-stage retrieval** — do not collapse back to single-stage:
+  1. Bi-encoder (MiniLM) retrieves `limit=20` candidates from Qdrant.
+  2. Cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each query×chunk pair and keeps top 5.
+  3. Both models are lazy-loaded via `@lru_cache(maxsize=1)` in `embedder.py`.
+  4. Re-ranker runs in `run_in_executor` (same as embedder) — never block the async loop.
+  ```python
+  docs = await loop.run_in_executor(None, partial(_qdrant_search, vec[0], ticker))
+  if len(docs) > 1:
+      docs = await loop.run_in_executor(None, partial(rerank, query, docs, 5))
+  ```
+- **Re-ingest required** whenever `CHUNK_SIZE` or `CHUNK_OVERLAP` changes — old chunks stay in Qdrant with their original UUIDs and will be served alongside new chunks until the collection is cleared.
 
 ### Chat route (apps/api/app/routes/chat.py)
 
@@ -124,11 +137,33 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 - All external calls (MCP, Qdrant, Claude) wrapped in `try/except` for graceful degradation
 - Phase 2+: use `asyncio.gather(*all_coros, return_exceptions=True)` — all sources concurrent
 
+### Agent loop (apps/api/app/agent/loop.py)
+
+- **Prompt caching** — system prompt and tool definitions are cached at Anthropic (ephemeral, 5-min TTL).
+  Do NOT revert to passing `system=SYSTEM_PROMPT` (string) — it must stay as the list form:
+  ```python
+  _SYSTEM_BLOCK = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+  _CACHED_TOOLS = copy.deepcopy(TOOL_DEFINITIONS)
+  _CACHED_TOOLS[-1] = {**_CACHED_TOOLS[-1], "cache_control": {"type": "ephemeral"}}
+  ```
+  Both are built once at module load and reused on every `ac.messages.create()` call.
+- History passed in from `chat.py` is already text-only (the frontend never stores tool_use/tool_result blocks). No stripping needed in `run_agent`.
+- The forced final synthesis call (when rounds exhausted) also uses `_SYSTEM_BLOCK` and `_CACHED_TOOLS` with `tool_choice={"type": "none"}` — the test checks for this kwarg.
+
 ### Config (apps/api/app/config.py)
 
 - Loads from monorepo root `.env` via `Path(__file__).resolve().parents[3]`
 - All keys default to `""` — feature-gate on truthiness (`if settings.fmp_api_key:`)
 - Adding a new key: add to `Settings` class with `str = ""` default
+- **Current token budget:** `claude_max_tokens=1024`, `claude_max_tool_rounds=3` — do not raise without a clear reason; most financial Q&A fits in ≤400 output tokens and ≤2 tool rounds
+
+### Tool definitions (apps/api/app/agent/tools.py)
+
+- `search_docs` must be the **first** tool in `TOOL_DEFINITIONS` — Claude uses list order as a recency/preference signal.
+- Each description encodes when NOT to use the tool ("use ONLY when…", "avoid if search_docs answers it") — this is what actually controls routing; vague descriptions cause the model to over-call EDGAR.
+- `get_filing_content` default `max_chars=3000` — do not raise above 4000; each 1000 chars ≈ 250 tokens in tool results sent back in context.
+- Tool routing priority (cheapest → most expensive): `search_docs` → `get_stock_quote` / `get_earnings_history` → `search_news` / `get_news_sentiment` → `search_sec_filings` → `get_filing_content`.
+- Never duplicate tool descriptions between the tool def and the system prompt — the system prompt routing ladder refers to tools by name; the descriptions carry the detail.
 
 ### Tests
 
@@ -213,6 +248,12 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | `earnings` route returned raw `None` from FMP | `None` passed back as JSON — not an empty list | Added `or []` guard: `return result or []` |
 | Calendar endpoint accepted arbitrary date strings | LLM could pass bad format → no validation before FMP call | `date.fromisoformat()` guard → `HTTPException(422)` |
 | recharts `Tooltip` formatter typed `val: number` | TypeScript error — value is `ValueType \| undefined` | `typeof val === "number"` guard before `.toFixed()` |
+| Chunker infinite loop on short text | `max(step, 1)` advances 1 char/iter when text < overlap | `break` when `end >= len(text)` — never rely on `max(step, 1)` alone |
+| Bi-encoder retrieves 5 hard-cut candidates | Low precision; adjacent chunks miss the actual answer | Two-stage: fetch limit=20, re-rank with CrossEncoder, return top 5 |
+| `search_sec_filings` called before `search_docs` | Live EDGAR hit for data already in local DB | `search_docs` listed first in `TOOL_DEFINITIONS`; "ALWAYS try first" in description |
+| System prompt resent in full on every API call | ~700 tokens × N rounds per request | `cache_control: ephemeral` on `_SYSTEM_BLOCK` and `_CACHED_TOOLS[-1]` |
+| `max_tokens=4096` allows report-length output | Claude produces tables and headers for simple Q | Reduced to 1024; enforces the brevity rule in the system prompt |
+| `max_tool_rounds=5` allows runaway investigation | 5 consecutive EDGAR fetches on a complex query | Reduced to 3; forced final call handles the exhausted-rounds edge case |
 
 ### Infrastructure
 
@@ -239,7 +280,8 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | **5** | Golden Q&A tests + investor response schema | Done |
 | **6** | Chat UI citations panel + SSE streaming | **Done** |
 | **7** | Earnings dashboard (surprises, guidance trends) | **Done** |
-| **8** | Deployment — Render (API) + Vercel (web) | **Next** |
+| **8** | RAG optimisation — re-ranking, tool routing, prompt caching, token budget | **Done** |
+| **9** | Deployment — Render (API) + Vercel (web) | **Next** |
 
 ### Phase 3 — complete
 
@@ -290,25 +332,25 @@ All steps committed to `main`. 67 tests passing.
 | Step 2 | `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, `package.json` | recharts installed; EPS bar chart, 7-day calendar, 2×2 metrics grid |
 | Step 3 | `ChatShell.tsx` | "Dashboard →" nav link in chat header |
 
+### Phase 8 — complete
+
+One commit to `main`. 67 tests passing.
+
+| Step | Files | Notes |
+|------|-------|-------|
+| Step 1 | `chunker.py`, `embedder.py`, `store.py`, `tools.py`, `prompts.py`, `loop.py`, `config.py` | Paragraph snapping, cross-encoder re-ranker, RAG-first tool descriptions, prompt caching, token budget |
+
+> After this commit, clear the Qdrant collection and re-ingest all tickers — old 1500-char hard-cut chunks will otherwise be served alongside new paragraph-snapped chunks.
+
 ---
 
 ## Remaining phases — full specifications
 
-### Phase 7: Earnings dashboard — **Complete**
-
-All steps committed to `main`. 67 tests passing.
-
-| Step | Files | Notes |
-|------|-------|-------|
-| Step 1 | `routes/market.py`, `main.py`, `tests/test_market.py` | 4 GET endpoints, graceful no-key degradation, ISO date validation, 9 unit tests |
-| Step 2 | `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, `package.json` | recharts bar chart, 7-day calendar list, 2×2 metrics grid |
-| Step 3 | `ChatShell.tsx` | "Dashboard →" link in header; "← Chat" on dashboard page |
-
-### Phase 8: Deployment (Render + Vercel) — **Next**
+### Phase 9: Deployment (Render + Vercel) — **Next**
 
 Deploy FastAPI backend to Render and Next.js frontend to Vercel.
 
-**Blocked on:** Qdrant hosting decision — Render free tier has no persistent disk, so Qdrant must be external. Choose Qdrant Cloud (managed free tier) or self-hosted VPS before starting.
+**Blocked on:** Qdrant hosting decision — Render free tier has no persistent disk, so Qdrant must be external. Choose Qdrant Cloud (managed free tier) or self-hosted VPS before starting. After deploy, run a fresh ingest against the remote Qdrant URL.
 
 #### Backend — Render
 

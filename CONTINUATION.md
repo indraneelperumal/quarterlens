@@ -1,6 +1,6 @@
 # Continuation — MCP Earnings Intelligence Agent
 
-**Last updated:** Phase 7 complete. Earnings dashboard live at `/dashboard` — EPS surprise chart, upcoming calendar, key metrics grid, `/market` API routes.
+**Last updated:** Phase 8 step 1 complete. RAG cross-encoder re-ranking, paragraph-aware chunking, RAG-first tool routing, Anthropic prompt caching, token budget tightened.
 **Frozen spec:** Next.js + FastAPI, Qdrant, FMP + AV + Tavily, hybrid MCP+RAG, Claude Sonnet agent loop.
 
 ---
@@ -49,7 +49,8 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | API | FastAPI (Python 3.10+) | async routes, Pydantic v2 |
 | LLM | Anthropic Claude Sonnet | Agent loop — tool_use synthesis. Haiku only in Phase 2 fallback |
 | Vector DB | Qdrant (Docker, local :6333) | Collection `financial_docs`, 384-dim cosine |
-| Embeddings | sentence-transformers `all-MiniLM-L6-v2` | Local, no API cost, lazy `@lru_cache` |
+| Bi-encoder | `all-MiniLM-L6-v2` (sentence-transformers) | Local embeddings; 384-dim; lazy `@lru_cache` |
+| Re-ranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Scores query×chunk pairs; top-5 from 20 candidates |
 | Market data | FMP `/stable/` (primary) + Alpha Vantage (sentiment) | Free tier; 250 req/day FMP |
 | News | Tavily (real-time search) | Direct async REST |
 | SEC filings | EDGAR (no key; User-Agent required) | Custom FastMCP server |
@@ -68,11 +69,12 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | **5** | Golden Q&A tests + investor response schema | Done |
 | **6** | Chat UI citations panel + SSE streaming | **Done** |
 | **7** | Earnings dashboard (EPS surprises, guidance trends) | **Done** |
-| **8** | Deployment — Render (API) + Vercel (web) | **Next** |
+| **8** | RAG optimisation — re-ranking, tool routing, prompt caching, token budget | **Done** |
+| **9** | Deployment — Render (API) + Vercel (web) | **Next** |
 
 ---
 
-## Current state — Phase 7 complete (all committed to `main`)
+## Current state — Phase 8 step 1 complete (all committed to `main`)
 
 **67 tests passing.**
 
@@ -92,14 +94,23 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 - Ticker-free queries — agent responds without a ticker
 - Multi-turn history — full context sent with every request
 - 4 golden Q&A tests pass against live API (skipped without key)
+- Two-stage RAG retrieval: bi-encoder fetches 20 Qdrant candidates → cross-encoder re-ranks → top 5 returned
+- Paragraph-aware chunking: chunks snap to nearest `\n\n`/`. ` boundary, preventing mid-sentence cuts
+- Tool routing: `search_docs` (local Qdrant) always called before `search_sec_filings` (live EDGAR)
+- Prompt caching: system prompt + tool definitions cached at Anthropic — ~1200 tokens saved per call after first
+- Token budget: `max_tokens` 4096→1024, `max_tool_rounds` 5→3
 
 ### Key files
 
 | File | Role |
 |------|------|
+| `apps/api/app/rag/chunker.py` | Paragraph-aware chunking; overlap=300; `_snap_to_boundary()` |
+| `apps/api/app/rag/embedder.py` | Bi-encoder (MiniLM) + cross-encoder re-ranker; `rerank(query, docs, top_k)` |
+| `apps/api/app/rag/store.py` | Qdrant CRUD; default `limit=20` for re-ranker candidate pool |
 | `apps/api/app/agent/schema.py` | `Citation`, `KeyNumber`, `InvestorResponse` Pydantic models |
-| `apps/api/app/agent/tools.py` | 7 tools + `execute_tool()` + `safe_json()` + `extract_citations()` |
-| `apps/api/app/agent/loop.py` | `run_agent()` → `tuple[str, list[Citation]]` with deduplication |
+| `apps/api/app/agent/tools.py` | 7 tools with RAG-first descriptions; `rerank` wired into `search_docs`; `max_chars=3000` |
+| `apps/api/app/agent/prompts.py` | System prompt with numbered tool routing ladder |
+| `apps/api/app/agent/loop.py` | `run_agent()` with prompt caching (`_SYSTEM_BLOCK`, `_CACHED_TOOLS`) |
 | `apps/api/app/routes/chat.py` | `/chat` → `InvestorResponse`; `/chat/stream` → word-by-word SSE + citations |
 | `apps/api/app/routes/market.py` | `/market/quote`, `/earnings`, `/calendar`, `/metrics` — thin wrappers over market_client |
 | `apps/api/tests/test_golden_qa.py` | 4 golden Q&A tests (skipped without `ANTHROPIC_API_KEY`) |
@@ -149,14 +160,39 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | 7 | `earnings` route returned raw `None` from FMP | Added `or []` guard |
 | 7 | Calendar accepted arbitrary date strings | `date.fromisoformat()` validation → `HTTPException(422)` |
 | 7 | recharts `Tooltip` formatter typed `val: number` | `typeof val === "number"` type guard |
+| 8 | Chunker infinite loop on short text | `break` when `end >= len(text)` instead of `max(step, 1)` advance |
+| 8 | Bi-encoder only — no re-ranking on Qdrant results | Added `CrossEncoder` + `rerank()` in `embedder.py`; wired into `execute_tool` |
+| 8 | Model routes to EDGAR before checking local DB | Rewrote tool descriptions; `search_docs` listed first with explicit "ALWAYS try first" |
+| 8 | System prompt + tools repeated in full on every call | `cache_control: ephemeral` on `_SYSTEM_BLOCK` and `_CACHED_TOOLS[-1]` |
+| 8 | `claude_max_tokens=4096` allows report-length output | Reduced to 1024; most answers ≤400 tokens |
+| 8 | `claude_max_tool_rounds=5` allows runaway investigation | Reduced to 3; 1–2 rounds typical |
 
 ---
 
-## Next — Phase 8: Deployment (Render + Vercel)
+## Phase 8 complete — RAG optimisation
+
+Committed to `main` as one step. 67 tests passing.
+
+| Change | File | Effect |
+|--------|------|--------|
+| Paragraph-aware chunking, overlap 200→300 | `chunker.py` | Chunks no longer cut mid-sentence |
+| Cross-encoder re-ranker | `embedder.py` | Fetch 20 → score → keep top 5; precision ↑ |
+| Qdrant default `limit` 8→20 | `store.py` | More candidates for re-ranker |
+| RAG-first tool descriptions + routing ladder in prompt | `tools.py`, `prompts.py` | Model uses local DB before hitting live EDGAR |
+| `max_chars` 8000→3000 in `get_filing_content` | `tools.py` | ~1250 tokens saved per filing fetch |
+| Prompt caching on system + tool defs | `loop.py` | ~1200 tokens saved per API call after first |
+| `max_tokens` 4096→1024, `max_tool_rounds` 5→3 | `config.py` | Caps output + loop depth |
+
+> **Re-ingest required** after chunker change — old 1500-char hard-cut chunks are still in Qdrant.
+> See Commands section below.
+
+---
+
+## Next — Phase 9: Deployment (Render + Vercel)
 
 Deploy the full stack publicly. Qdrant must be external (Render free tier has no persistent disk).
 
-### Decision needed first
+### Decision needed first (blocks deployment)
 
 **Qdrant hosting:** choose one:
 - **Qdrant Cloud free tier** — managed, 1 GB, no ops overhead (recommended)
@@ -238,8 +274,23 @@ cd apps/web && npm run dev
 # Tests (must use python -m from inside apps/api)
 cd apps/api && python -m pytest -q
 
-# Ingest a ticker into Qdrant
-cd apps/api && python -c "import asyncio; from app.rag.ingest import ingest_ticker; asyncio.run(ingest_ticker('AAPL'))"
+# Clear old chunks and re-ingest after chunker change (Phase 8)
+cd apps/api && python -c "
+from qdrant_client import QdrantClient
+QdrantClient('http://localhost:6333').delete_collection('financial_docs')
+print('cleared')
+"
+
+# Ingest a ticker (correct signature: store + user_agent required)
+cd apps/api && python -c "
+import asyncio
+from app.rag.ingest import ingest_ticker
+from app.rag.store import VectorStore
+from app.config import settings
+store = VectorStore(settings.qdrant_url)
+store.ensure_collection()
+asyncio.run(ingest_ticker('AAPL', store, settings.sec_edgar_user_agent))
+"
 
 # Smoke tests
 curl -s http://localhost:8000/health | python -m json.tool
