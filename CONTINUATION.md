@@ -1,6 +1,6 @@
 # Continuation — MCP Earnings Intelligence Agent
 
-**Last updated:** Phase 6 complete. Citations panel live, SSE streaming active, `InvestorResponse` wired end-to-end.
+**Last updated:** Phase 7 complete. Earnings dashboard live at `/dashboard` — EPS surprise chart, upcoming calendar, key metrics grid, `/market` API routes.
 **Frozen spec:** Next.js + FastAPI, Qdrant, FMP + AV + Tavily, hybrid MCP+RAG, Claude Sonnet agent loop.
 
 ---
@@ -66,18 +66,25 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | **4** | Frontend: multi-turn history in Next.js chat shell | Done |
 | **5** | Golden Q&A tests + investor response schema | Done |
 | **6** | Chat UI citations panel + SSE streaming | **Done** |
-| **7** | Earnings dashboard (EPS surprises, guidance trends) | **Next** |
+| **7** | Earnings dashboard (EPS surprises, guidance trends) | **Done** |
+| **8** | Deployment — Render (API) + Vercel (web) | **Next** |
 
 ---
 
-## Current state — Phase 6 complete (all committed to `main`)
+## Current state — Phase 7 complete (all committed to `main`)
 
-**58 tests passing.**
+**67 tests passing.**
 
 ### What works end-to-end
 
 - `POST /chat` — returns `InvestorResponse` (`answer`, `citations`, `key_numbers`, `sentiment`, `disclaimer`)
 - `POST /chat/stream` — SSE: word-by-word text chunks → `{"citations": [...]}` event → `[DONE]`
+- `GET /market/quote/{ticker}` — live price, change %, market cap, 52-wk range
+- `GET /market/earnings/{ticker}` — last 4 quarters EPS actuals vs estimates + surprise %
+- `GET /market/calendar` — 7-day upcoming earnings calendar
+- `GET /market/metrics/{ticker}` — PE, PB, ROE, debt/equity (TTM)
+- `/dashboard` page — ticker selector, quote card, recharts EPS bar chart, earnings calendar, metrics grid
+- "Dashboard →" link in chat header; "← Chat" link on dashboard
 - Citations extracted from `search_sec_filings` and `search_docs` tool results, deduplicated by accession number
 - Frontend consumes SSE stream: text appears word-by-word; citations panel appears after `[DONE]`
 - Collapsible "N sources" panel under each assistant reply; form-type badges (8-K=red, 10-K=green, 10-Q=blue)
@@ -93,10 +100,16 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 | `apps/api/app/agent/tools.py` | 7 tools + `execute_tool()` + `safe_json()` + `extract_citations()` |
 | `apps/api/app/agent/loop.py` | `run_agent()` → `tuple[str, list[Citation]]` with deduplication |
 | `apps/api/app/routes/chat.py` | `/chat` → `InvestorResponse`; `/chat/stream` → word-by-word SSE + citations |
+| `apps/api/app/routes/market.py` | `/market/quote`, `/earnings`, `/calendar`, `/metrics` — thin wrappers over market_client |
 | `apps/api/tests/test_golden_qa.py` | 4 golden Q&A tests (skipped without `ANTHROPIC_API_KEY`) |
-| `apps/web/src/components/ChatShell.tsx` | SSE stream reader, streaming bubble, history |
+| `apps/api/tests/test_market.py` | 9 unit tests for market routes (all monkeypatched) |
+| `apps/web/src/components/ChatShell.tsx` | SSE stream reader, streaming bubble, history; "Dashboard →" link |
 | `apps/web/src/components/CitationsPanel.tsx` | Collapsible "N sources" toggle |
 | `apps/web/src/components/SourceCard.tsx` | Form badge, date, excerpt, EDGAR link |
+| `apps/web/src/app/dashboard/page.tsx` | `/dashboard` — quote card, EPS chart, calendar, metrics grid |
+| `apps/web/src/components/EarningsSurpriseChart.tsx` | recharts bar chart: actual vs estimate, surprise % label |
+| `apps/web/src/components/EarningsCalendar.tsx` | 7-day upcoming earnings list |
+| `apps/web/src/components/MetricsGrid.tsx` | 2×2 metrics grid (PE, PB, ROE, D/E) |
 
 ---
 
@@ -114,26 +127,33 @@ MCP-powered earnings intelligence for **retail investors** who manage their own 
 
 ---
 
-## Next — Phase 7: Earnings dashboard
+## Next — Phase 8: Deployment (Render + Vercel)
 
-Dedicated `/dashboard` page showing EPS surprises, upcoming earnings calendar, and key metrics.
+Deploy FastAPI backend to Render and Next.js frontend to Vercel.
 
-**New API routes (`apps/api/app/routes/market.py`):**
-```
-GET /market/quote/{ticker}    → price, change%, marketCap, pe, yearHigh, yearLow
-GET /market/earnings/{ticker} → list[{date, eps, epsEstimated, surprisePct}]
-GET /market/calendar          → 7-day upcoming earnings [{symbol, date, epsEstimated, time}]
-GET /market/metrics/{ticker}  → peRatioTTM, pbRatioTTM, roeTTM, debtToEquityTTM
-```
+**Steps:**
+1. Add `render.yaml` at monorepo root for the FastAPI service
+2. Set env vars in Render dashboard (ANTHROPIC_API_KEY, FMP_API_KEY, etc.)
+3. Deploy to Vercel (auto-detects Next.js in `apps/web`); set `NEXT_PUBLIC_API_URL` to Render service URL
+4. Qdrant: either Qdrant Cloud (free tier) or self-hosted on a VPS; update `QDRANT_URL`
 
-**New frontend files:**
-- `apps/web/src/app/dashboard/page.tsx` — Next.js App Router page at `/dashboard`
-- `apps/web/src/components/EarningsSurpriseChart.tsx` — bar chart (actual vs estimate, surprise %)
-- `apps/web/src/components/EarningsCalendar.tsx` — 7-day upcoming earnings list
-- `apps/web/src/components/MetricsGrid.tsx` — PE, PB, ROE, D/E grid
+**Blocked on:** Qdrant hosting decision (Qdrant Cloud vs self-hosted). Render free tier has no persistent disk — Qdrant must be external.
 
-**Also add:** "Dashboard" link in chat header pointing to `/dashboard`.
-**Confirm chart library choice** (recharts vs native SVG) before adding npm dependency.
+---
+
+## Bugs fixed (Phase 7)
+
+| Bug | Fix |
+|-----|-----|
+| `earnings` route returned raw `None` from FMP | Added `or []` guard: `return result or []` |
+| Calendar accepted arbitrary date strings | Added `date.fromisoformat()` validation → `HTTPException(422)` |
+| recharts `Tooltip` formatter typed `val: number` | Changed to `typeof val === "number"` type guard |
+
+---
+
+## Archived — Phase 7 plan
+
+Done. See Key files table above.
 
 ---
 

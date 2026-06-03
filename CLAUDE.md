@@ -229,7 +229,8 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | **4** | Frontend: multi-turn history + markdown rendering in Next.js chat shell | Done |
 | **5** | Golden Q&A tests + investor response schema | Done |
 | **6** | Chat UI citations panel + SSE streaming | **Done** |
-| **7** | Earnings dashboard (surprises, guidance trends) | **Next** |
+| **7** | Earnings dashboard (surprises, guidance trends) | **Done** |
+| **8** | Deployment — Render (API) + Vercel (web) | **Next** |
 
 ### Phase 3 — complete
 
@@ -274,64 +275,9 @@ All steps committed to `main`. 58 tests passing.
 
 ## Remaining phases — full specifications
 
-### Phase 7: Earnings dashboard
+### Phase 7: Earnings dashboard — **Complete**
 
-**Goal:** Dedicated dashboard page showing EPS surprises, upcoming earnings calendar, and key metrics for watchlist tickers.
-
-#### Files to create
-
-| File | Role |
-|------|------|
-| `apps/api/app/routes/market.py` | New FastAPI router: `/market/quote/{ticker}`, `/market/earnings/{ticker}`, `/market/calendar` |
-| `apps/web/src/app/dashboard/page.tsx` | New Next.js App Router page (`/dashboard`) |
-| `apps/web/src/components/EarningsSurpriseChart.tsx` | Bar chart: actual vs estimate per quarter |
-| `apps/web/src/components/EarningsCalendar.tsx` | 7-day upcoming earnings list |
-| `apps/web/src/components/MetricsGrid.tsx` | Key metrics grid (PE, PB, ROE, debt/equity) |
-
-#### New API routes (`market.py`)
-
-```
-GET /market/quote/{ticker}
-  → { symbol, price, changesPercentage, marketCap, pe, eps, yearHigh, yearLow }
-
-GET /market/earnings/{ticker}?limit=4
-  → list of { date, eps, epsEstimated, surprisePct }
-
-GET /market/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
-  → list of { symbol, date, epsEstimated, time }  (time = "BMO"/"AMC")
-
-GET /market/metrics/{ticker}
-  → { peRatioTTM, pbRatioTTM, roeTTM, debtToEquityTTM, revenuePerShareTTM, netIncomePerShareTTM }
-```
-
-All routes use `market_client` — skip gracefully if `FMP_API_KEY` is empty (return empty/null).
-
-#### Dashboard page layout
-
-```
-[Ticker selector: AAPL | GOOGL | MSFT | NVDA | ...]
-
-┌─────────────────────────────────────────────────────┐
-│  NVDA  $135.20  +2.1%  PE: 42.3  Mkt Cap: $3.3T    │
-│  52-wk: $86.12 – $153.13                            │
-└─────────────────────────────────────────────────────┘
-
-┌─────────────── EPS Surprise (last 4 Q) ────────────┐
-│  Bar chart: actual (solid) vs estimate (outline)    │
-│  Surprise % label on each bar                       │
-└─────────────────────────────────────────────────────┘
-
-┌─────── Key Metrics ────────────┬─── Upcoming Earnings ──────────┐
-│  PE:   42.3                    │  AAPL  2026-06-10  Before Open │
-│  PB:    8.1                    │  MSFT  2026-06-12  After Close  │
-│  ROE:  31.4%                   │  NVDA  2026-06-14  After Close  │
-│  D/E:   0.4                    │                                 │
-└────────────────────────────────┴─────────────────────────────────┘
-```
-
-Chart library: use a minimal option — `recharts` (already common in Next.js projects) or native SVG if bundle size matters. Confirm with user before adding a new npm dependency.
-
-Navigation: add a "Dashboard" link in the chat header (`apps/web/src/components/ChatShell.tsx`) pointing to `/dashboard`.
+Delivered: `routes/market.py` (4 endpoints), `dashboard/page.tsx`, `EarningsSurpriseChart.tsx`, `EarningsCalendar.tsx`, `MetricsGrid.tsx`, "Dashboard →" nav link. recharts used for bar chart. 67 tests passing.
 
 ---
 
