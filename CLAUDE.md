@@ -281,7 +281,7 @@ Follow `packages/mcp-servers/market-data/fmp_client.py`:
 | **6** | Chat UI citations panel + SSE streaming | **Done** |
 | **7** | Earnings dashboard (surprises, guidance trends) | **Done** |
 | **8** | RAG optimisation — re-ranking, tool routing, prompt caching, token budget | **Done** |
-| **9** | Deployment — Render (API) + Vercel (web) | **Next** |
+| **9** | Deployment — Render (API) + Vercel (web) | **Done** |
 
 ### Phase 3 — complete
 
@@ -342,34 +342,25 @@ One commit to `main`. 67 tests passing.
 
 > After this commit, clear the Qdrant collection and re-ingest all tickers — old 1500-char hard-cut chunks will otherwise be served alongside new paragraph-snapped chunks.
 
----
+### Phase 9 — complete
 
-## Remaining phases — full specifications
+All steps committed to `main`. Project is live.
 
-### Phase 9: Deployment (Render + Vercel) — **Next**
+| Step | Files | Notes |
+|------|-------|-------|
+| Rebrand | `layout.tsx`, `ChatShell.tsx`, `main.py`, `health.py`, `config.py`, `server.py`, `pyproject.toml`, `test_root.py` | Renamed to QuarterLens; SEC_EDGAR_USER_AGENT → `QuarterLens indraneelr83@outlook.com` |
+| Step 1 | `config.py`, `store.py`, `tools.py`, `chat.py`, `ingest.py`, `render.yaml`, `build.sh` | `qdrant_api_key` setting; Qdrant Cloud auth; CPU-only torch build; `render.yaml` at monorepo root |
+| Ingest | Qdrant Cloud | 736 chunks across 9 tickers (AAPL/GOOGL/MSFT/NVDA/AMZN/JPM/UNH/XOM/COST) ingested into cloud collection |
 
-Deploy FastAPI backend to Render and Next.js frontend to Vercel.
+**Render dashboard settings (render.yaml is NOT auto-read for dashboard-created services):**
+- Root Directory: *(blank)*
+- Build Command: `cd apps/api && bash build.sh`
+- Start Command: `cd apps/api && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 
-**Blocked on:** Qdrant hosting decision — Render free tier has no persistent disk, so Qdrant must be external. Choose Qdrant Cloud (managed free tier) or self-hosted VPS before starting. After deploy, run a fresh ingest against the remote Qdrant URL.
-
-#### Backend — Render
-
-1. Create `render.yaml` at monorepo root specifying `rootDir: apps/api`, build command `pip install -e ".[dev]"`, start command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-2. Add all env vars in Render dashboard (ANTHROPIC_API_KEY, FMP_API_KEY, ALPHA_VANTAGE_API_KEY, TAVILY_API_KEY, QDRANT_URL, SEC_EDGAR_USER_AGENT).
-3. Connect GitHub repo → Render auto-deploys on every push to `main`.
-
-#### Frontend — Vercel
-
-1. Import repo; set **Root Directory** to `apps/web`.
-2. Add `NEXT_PUBLIC_API_URL=https://<render-service>.onrender.com`.
-3. Deploy — Vercel auto-detects Next.js App Router, no extra config.
-
-#### Post-deploy checklist
-
-- `curl https://<render-service>.onrender.com/health` → 200
-- Chat UI streams a response end-to-end
-- Dashboard loads quote + EPS chart for AAPL
-- Ingest at least one ticker into remote Qdrant after deploy
+**Known infrastructure notes:**
+- `render.yaml` is only auto-applied via Render Blueprint deploys; dashboard-created services use dashboard settings
+- Heredoc (`python - <<'EOF'`) is required for multiline Python in zsh — `python -c "..."` breaks on indentation
+- Qdrant Cloud cluster: `b01d662c-f395-4e57-932b-c2dacf780343.us-east-1-1.aws.cloud.qdrant.io`
 
 ---
 
