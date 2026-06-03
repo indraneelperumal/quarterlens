@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routes import chat, health
+from app.routes import chat, health, market
 
 app = FastAPI(
     title="Earnings Intelligence API",
@@ -20,3 +20,4 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(chat.router)
+app.include_router(market.router)
