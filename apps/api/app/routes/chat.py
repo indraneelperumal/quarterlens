@@ -455,8 +455,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 else:
                     yield f"data: {json.dumps({'text': chunk})}\n\n"
         except Exception as exc:
-            log.warning("Agent stream error: %s", exc)
-            yield f"data: {json.dumps({'text': f'Error: {exc}'})}\n\n"
+            import traceback
+            log.warning("Agent stream error [%s]: %s\n%s", type(exc).__name__, exc, traceback.format_exc())
+            yield f"data: {json.dumps({'text': f'Error [{type(exc).__name__}]: {exc}'})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
