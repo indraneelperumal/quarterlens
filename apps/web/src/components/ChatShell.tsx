@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, Fragment, useState } from "react";
+import { FormEvent, useState } from "react";
 import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { CitationsPanel } from "./CitationsPanel";
 
 const WATCHLIST = ["AAPL", "GOOGL", "MSFT", "NVDA", "AMZN", "JPM", "UNH", "XOM", "COST"];
@@ -23,23 +25,30 @@ type Message = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-/** Render plain text with **bold** and newline support — no extra deps. */
 function MessageContent({ text }: { text: string }) {
   return (
-    <>
-      {text.split("\n").map((line, li) => (
-        <Fragment key={li}>
-          {li > 0 && <br />}
-          {line.split(/(\*\*[^*]+\*\*)/).map((part, pi) =>
-            part.startsWith("**") && part.endsWith("**") ? (
-              <strong key={pi}>{part.slice(2, -2)}</strong>
-            ) : (
-              <span key={pi}>{part}</span>
-            )
-          )}
-        </Fragment>
-      ))}
-    </>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        table: (props) => (
+          <div className="overflow-x-auto my-2">
+            <table className="min-w-full text-xs border-collapse" {...props} />
+          </div>
+        ),
+        thead: (props) => <thead className="bg-zinc-200 dark:bg-zinc-700" {...props} />,
+        th: (props) => <th className="border border-zinc-300 dark:border-zinc-600 px-2 py-1 text-left font-semibold" {...props} />,
+        td: (props) => <td className="border border-zinc-300 dark:border-zinc-600 px-2 py-1" {...props} />,
+        hr: () => <hr className="my-2 border-zinc-300 dark:border-zinc-600" />,
+        p: (props) => <p className="mb-1 last:mb-0" {...props} />,
+        ul: (props) => <ul className="list-disc list-inside mb-1 space-y-0.5" {...props} />,
+        ol: (props) => <ol className="list-decimal list-inside mb-1 space-y-0.5" {...props} />,
+        strong: (props) => <strong className="font-semibold" {...props} />,
+        em: (props) => <em className="italic" {...props} />,
+        code: (props) => <code className="bg-zinc-200 dark:bg-zinc-700 rounded px-1 text-xs font-mono" {...props} />,
+      }}
+    >
+      {text}
+    </ReactMarkdown>
   );
 }
 
