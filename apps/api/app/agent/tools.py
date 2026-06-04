@@ -175,6 +175,17 @@ def extract_citations(tool_name: str, result: Any) -> list[Citation]:
                 excerpt=raw_text[:150] if raw_text else None,
                 source_url=c.get("source_url", ""),
             ))
+    elif tool_name == "search_news":
+        for item in result:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            citations.append(Citation(
+                accession_number="",
+                date=item.get("published_date", ""),
+                form_type="news",
+                excerpt=item.get("title", ""),
+                source_url=item.get("url", ""),
+            ))
     return citations
 
 
