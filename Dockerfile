@@ -15,8 +15,10 @@ COPY . .
 # Install CPU-only PyTorch first — prevents sentence-transformers from pulling the 2 GB GPU build
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install the API package and all its dependencies
-RUN pip install --no-cache-dir -e apps/api
+# Install the API package and all its dependencies.
+# Pin transformers<4.51: newer versions import torch.float8_e8m0fnu at module load,
+# which is not present in CPU-only PyTorch builds.
+RUN pip install --no-cache-dir -e apps/api "transformers>=4.41,<4.51"
 
 # Pre-download embedding models at image build time so the first request is fast
 ENV HF_HOME=/code/.cache/huggingface
