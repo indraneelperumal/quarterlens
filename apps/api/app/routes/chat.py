@@ -18,8 +18,8 @@ from app.agent.schema import InvestorResponse
 from app.config import settings
 from app.mcp import client as mcp_client
 from app.mcp import market_client, news
+from app.agent.tools import _get_store
 from app.rag.embedder import embed_texts
-from app.rag.store import VectorStore
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 log = logging.getLogger(__name__)
@@ -118,9 +118,7 @@ async def _search_filing_chunks(message: str, ticker: str) -> tuple[list[dict], 
 
 
 def _qdrant_search(vector: list[float], ticker: str) -> list[dict]:
-    store = VectorStore(settings.qdrant_url, settings.qdrant_api_key)
-    store.ensure_collection()
-    return store.search(vector, limit=5, ticker=ticker, form_type="8-K")
+    return _get_store().search(vector, limit=5, ticker=ticker, form_type=None)
 
 
 async def _market_snapshot(ticker: str) -> dict[str, Any]:
@@ -455,9 +453,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 else:
                     yield f"data: {json.dumps({'text': chunk})}\n\n"
         except Exception as exc:
-            import traceback
-            log.warning("Agent stream error [%s]: %s\n%s", type(exc).__name__, exc, traceback.format_exc())
-            yield f"data: {json.dumps({'text': f'Error [{type(exc).__name__}]: {exc}'})}\n\n"
+            log.warning("Agent stream error: %s", exc, exc_info=True)
+            yield f"data: {json.dumps({'text': f'Error: {exc}'})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(

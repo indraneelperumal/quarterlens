@@ -57,7 +57,7 @@ def _get_client(api_key: str) -> anthropic.AsyncAnthropic:
         # hosting providers (e.g. HF Spaces) inject — they can break outbound
         # connections to api.anthropic.com.
         _ac = anthropic.AsyncAnthropic(
-            api_key=api_key,
+            api_key=api_key.strip(),
             http_client=httpx.AsyncClient(
                 timeout=httpx.Timeout(60.0),
                 trust_env=False,
@@ -84,6 +84,13 @@ def _with_history_cache(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}],
         }
     return msgs
+
+
+def _log_cache_stats(usage: Any) -> None:
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    created = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    if read or created:
+        log.debug("Prompt cache: %d tokens read, %d tokens created", read, created)
 
 
 def _dedup_citations(citations: list[Citation]) -> list[Citation]:
@@ -125,6 +132,8 @@ async def run_agent(
             tools=_CACHED_TOOLS,
             messages=messages,
         )
+
+        _log_cache_stats(response.usage)
 
         if response.stop_reason != "tool_use":
             break
@@ -170,6 +179,7 @@ async def run_agent(
             messages=messages,
         )
 
+    _log_cache_stats(response.usage)
     text = next(
         (b.text for b in response.content if hasattr(b, "text") and b.text),
         "",
@@ -218,6 +228,8 @@ async def stream_agent(
             async for text_chunk in stream.text_stream:
                 yield text_chunk
             response = await stream.get_final_message()
+
+        _log_cache_stats(response.usage)
 
         if response.stop_reason != "tool_use":
             break
