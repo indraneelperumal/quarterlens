@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 import anthropic
+import httpx
 
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.schema import Citation
@@ -52,7 +53,16 @@ _ac: anthropic.AsyncAnthropic | None = None
 def _get_client(api_key: str) -> anthropic.AsyncAnthropic:
     global _ac
     if _ac is None:
-        _ac = anthropic.AsyncAnthropic(api_key=api_key)
+        # trust_env=False: ignore HTTP_PROXY/HTTPS_PROXY env vars that some
+        # hosting providers (e.g. HF Spaces) inject — they can break outbound
+        # connections to api.anthropic.com.
+        _ac = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            http_client=httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0),
+                trust_env=False,
+            ),
+        )
     return _ac
 
 
