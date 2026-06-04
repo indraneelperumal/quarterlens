@@ -1,4 +1,14 @@
-# MCP Earnings Intelligence Agent
+---
+title: QuarterLens API
+emoji: 📊
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
+# QuarterLens — Earnings Intelligence Agent
 
 MCP-powered earnings intelligence for retail investors: live market context via MCP servers, embedded SEC filings in Qdrant, and Anthropic Claude for numeric, citation-backed chat.
 
